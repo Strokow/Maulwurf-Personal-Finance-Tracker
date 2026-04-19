@@ -1,0 +1,20 @@
+node_modules
+dist
+out
+coverage
+.DS_Store
+.eslintcache
+*.log*
+*.tsbuildinfo
+
+# Local AI tooling
+.claude/
+.qwen/
+
+# Personal notes / adhoc scripts
+brain.txt
+testofbrain.txt
+shit.txt
+*_diff.txt
+diagnose-*.js
+fix-encoding*.js
