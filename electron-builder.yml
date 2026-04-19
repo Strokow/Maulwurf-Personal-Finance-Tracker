@@ -1,4 +1,4 @@
-appId: com.electron.app
+appId: com.strokow.maulwurf-finance-tracker
 productName: finance-tracker
 directories:
   buildResources: build

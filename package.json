@@ -4,8 +4,7 @@
   "description": "Desktop finance tracker for personal banking in Germany — import, obligations, AI analysis via local Ollama.",
   "main": "./out/main/index.js",
   "author": "Strokow",
-  "license": "Apache-2.0",
-  "homepage": "",
+  "homepage": "https://github.com/Strokow/Maulwurf-Personal-Finance-Tracker",
   "scripts": {
     "format": "prettier --write .",
     "lint": "eslint --cache .",
@@ -68,5 +67,6 @@
     "typescript": "^5.9.3",
     "vite": "^7.2.6",
     "vitest": "^2.1.9"
-  }
+  },
+  "license": "Apache-2.0"
 }

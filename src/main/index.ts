@@ -5,6 +5,7 @@ import { optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/maulwurficon.png?asset'
 import Store from 'electron-store'
 import { checkAndNotify } from './notificationService'
+import { hashPin, verifyPin } from './pinService'
 
 const MAX_ATTEMPTS = 3
 
@@ -374,7 +375,6 @@ app.whenReady().then(() => {
 
   // IPC: PIN handlers
   ipcMain.handle('pin:verify', (_event, input: string) => {
-    const { verifyPin } = require('./pinService')
     let pinSettings = store.get('pinSettings', {
       enabled: false,
       pinHash: null,
@@ -409,7 +409,6 @@ app.whenReady().then(() => {
   })
 
   ipcMain.handle('pin:set', (_event, pin: string) => {
-    const { hashPin } = require('./pinService')
     store.set('pinSettings', {
       enabled: true,
       pinHash: hashPin(pin),
@@ -420,7 +419,6 @@ app.whenReady().then(() => {
   })
 
   ipcMain.handle('pin:disable', (_event, input: string) => {
-    const { verifyPin, hashPin } = require('./pinService')
     const pinSettings = store.get('pinSettings', {
       enabled: false,
       pinHash: null,
