@@ -120,6 +120,7 @@ export function ObligationsTab({
   })
   const [klarnaAddSaving, setKlarnaAddSaving] = useState(false)
   const [klarnaParseError, setKlarnaParseError] = useState('')
+  const [klarnaSaveError, setKlarnaSaveError] = useState('')
 
   // One-time cleanup: single-payment Klarna obligations (totalInstallments=1)
   // should not have ObligationMonth records in future months
@@ -327,6 +328,15 @@ export function ObligationsTab({
     return map
   }, [obligations, obligationMonths])
 
+  // BUG-014: Klarna полностью оплачена (paid count >= totalInstallments).
+  // Карточка остаётся видимой как «история», но не учитывается в шапке €/мес и в paidCount.
+  const isKlarnaCompleted = useCallback((o: Obligation): boolean => {
+    if (o.billingChain !== 'klarna') return false
+    if (!o.totalInstallments) return false
+    const paid = klarnaPaidCountMap.get(o.id) ?? 0
+    return paid >= o.totalInstallments
+  }, [klarnaPaidCountMap])
+
   // Obligations grouped by custom section
   const sectionObligations = useMemo(() => {
     const map = new Map<string, Obligation[]>()
@@ -398,6 +408,9 @@ export function ObligationsTab({
   }, [filtered, carryoverMap])
 
   const paidCount = filtered.filter((o) => {
+    // BUG-014: completed Klarna (paid >= totalInstallments) исключены из счётчика —
+    // их paid-метка за текущий месяц это часть импорт-истории, не реальный платёж пользователя.
+    if (isKlarnaCompleted(o)) return false
     // Yearly obligations covered by an earlier month's payment count as paid
     if (o.frequency === 'yearly' && isYearlyCovered(o)) return true
     const rec = getMonthRecord(o.id, year, month)
@@ -647,9 +660,6 @@ export function ObligationsTab({
     return ''
   }
 
-  const normalizeMerchantKey = (m: string): string =>
-    m.toLowerCase().trim().replace(/[\s.]+/g, '')
-
   const handleKlarnaAdd = async (): Promise<void> => {
     const merchant = klarnaAddMerchant.trim()
     const originalTotal = parseFloat(klarnaAddTotal)
@@ -657,26 +667,24 @@ export function ObligationsTab({
     const totalInstallments = parseInt(klarnaAddTotalInst)
     const paidInstallments = parseInt(klarnaAddPaidInst)
     const isSingle = klarnaPaymentType === 'single'
-    if (!merchant || isNaN(monthlyAmount)) return
-    if (!isSingle && isNaN(totalInstallments)) return
+    setKlarnaSaveError('')
+    if (!merchant) { setKlarnaSaveError('Укажи название магазина'); return }
+    if (isNaN(monthlyAmount) || monthlyAmount <= 0) { setKlarnaSaveError('Укажи сумму платежа'); return }
+    if (!isSingle && (isNaN(totalInstallments) || totalInstallments < 1)) {
+      setKlarnaSaveError('Укажи количество платежей'); return
+    }
+    if (!isSingle) {
+      const [y, m, d] = klarnaAddNextDate.split('-').map(Number)
+      if (!y || !m || !d || isNaN(y) || isNaN(m) || isNaN(d)) {
+        setKlarnaSaveError('Укажи дату следующего платежа'); return
+      }
+    }
     setKlarnaAddSaving(true)
     try {
-      const key = normalizeMerchantKey(merchant)
-
-      // Удаление существующего klarna-обязательства с тем же merchant-ключом
-      const duplicates = obligations.filter(
-        (o) => o.billingChain === 'klarna' &&
-          normalizeMerchantKey(o.name.replace(/\s*\((рассрочка|платёж).*\)\s*$/i, '')) === key
-      )
-      for (const dup of duplicates) {
-        await onDelete(dup.id)
-      }
-
       const todayYear = new Date().getFullYear()
       const todayMonth = new Date().getMonth() + 1
 
       if (isSingle) {
-        // Единоразовый платёж: только в текущем месяце
         const safePaid = isNaN(paidInstallments) ? 0 : paidInstallments
         const newObligation = await onAdd({
           name: `${merchant} (платёж Klarna ${monthlyAmount.toFixed(2)}€)`,
@@ -695,7 +703,6 @@ export function ObligationsTab({
           safePaid >= 1 ? 'paid' : 'unpaid'
         )
       } else {
-        // Рассрочка: расчёт месяца первого платежа
         const [npYear, npMonthNum, npDay] = klarnaAddNextDate.split('-').map(Number)
         const safePaid = isNaN(paidInstallments) ? 0 : paidInstallments
         let startYear = npYear
@@ -727,10 +734,13 @@ export function ObligationsTab({
       setKlarnaAddOpen(false)
       setKlarnaPasteText('')
       setKlarnaParseError('')
+      setKlarnaSaveError('')
       setKlarnaAddMerchant(''); setKlarnaAddTotal(''); setKlarnaAddMonthly('')
       setKlarnaAddTotalInst(''); setKlarnaAddPaidInst('0')
       setKlarnaPaymentType('installment')
       setKlarnaGenDate(new Date().toISOString().slice(0, 10))
+    } catch (e) {
+      setKlarnaSaveError('Не удалось сохранить: ' + (e instanceof Error ? e.message : 'неизвестная ошибка'))
     } finally {
       setKlarnaAddSaving(false)
     }
@@ -835,19 +845,6 @@ export function ObligationsTab({
       pushUndo('Изменение статуса обязательства', beforeState, afterState)
     }
 
-    // Auto-deactivate Klarna obligations when installment is fully paid
-    if (status === 'paid') {
-      const obligation = obligations.find(o => o.id === obligationId)
-      if (obligation?.billingChain === 'klarna' && obligation.totalInstallments) {
-        // Count total paid months for this obligation
-        const allPaidMonths = obligationMonths.filter(
-          m => m.obligationId === obligationId && m.status === 'paid'
-        ).length + 1 // +1 for the one we just marked
-        if (allPaidMonths >= obligation.totalInstallments) {
-          await onUpdate(obligationId, { isActive: false })
-        }
-      }
-    }
   }
 
   const handleCopyToMonth = async (obligation: Obligation, targetYear: number, targetMonth: number): Promise<void> => {
@@ -1536,7 +1533,7 @@ export function ObligationsTab({
                                 {klarnaMonthly.length}
                               </span>
                               <span className="text-xs text-pink-400/60">
-                                {klarnaMonthly.reduce((s, o) => s + (o.amount ?? 0), 0).toFixed(2)}€/мес
+                                {klarnaMonthly.filter(o => !isKlarnaCompleted(o)).reduce((s, o) => s + (o.amount ?? 0), 0).toFixed(2)}€/мес
                               </span>
                             </div>
                             <div className="flex items-center gap-1">
@@ -1823,12 +1820,12 @@ export function ObligationsTab({
         <motion.div
           initial={{ opacity: 0 }} animate={{ opacity: 1 }}
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
-          onClick={() => setKlarnaAddOpen(false)}
+          onMouseDown={(e) => { if (e.target === e.currentTarget) setKlarnaAddOpen(false) }}
         >
           <motion.div
             initial={{ scale: 0.95 }} animate={{ scale: 1 }}
             className="w-full max-w-lg rounded-xl border border-neutral-800 bg-neutral-900 p-6 shadow-xl max-h-[90vh] overflow-y-auto"
-            onClick={(e) => e.stopPropagation()}
+            onMouseDown={(e) => e.stopPropagation()}
           >
             <h3 className="mb-1 text-base font-semibold text-neutral-100">Добавить платёж Klarna</h3>
 
@@ -1957,13 +1954,16 @@ export function ObligationsTab({
                 </>
               )}
             </div>
+            {klarnaSaveError && (
+              <p className="mt-3 text-xs text-red-400">{klarnaSaveError}</p>
+            )}
             <div className="mt-5 flex justify-end gap-2">
-              <button type="button" onClick={() => setKlarnaAddOpen(false)}
+              <button type="button" onClick={() => { setKlarnaAddOpen(false); setKlarnaSaveError('') }}
                 className="rounded-md px-4 py-2 text-sm text-neutral-400 hover:text-neutral-200">
                 Отмена
               </button>
               <button type="button" onClick={handleKlarnaAdd}
-                disabled={klarnaAddSaving || !klarnaAddMerchant.trim() || !klarnaAddMonthly || (klarnaPaymentType === 'installment' && !klarnaAddTotalInst)}
+                disabled={klarnaAddSaving || !klarnaAddMerchant.trim() || !klarnaAddMonthly || (klarnaPaymentType === 'installment' && (!klarnaAddTotalInst || !klarnaAddNextDate))}
                 className="rounded-md bg-pink-900/60 px-4 py-2 text-sm font-medium text-pink-200 hover:bg-pink-900 disabled:opacity-40">
                 {klarnaAddSaving ? 'Сохранение...' : 'Добавить'}
               </button>

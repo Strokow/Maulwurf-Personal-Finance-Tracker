@@ -101,7 +101,7 @@ export function AddObligationModal({
     return () => window.removeEventListener('keydown', handleKey)
   }, [isOpen, onClose])
 
-  const handleBackdropClick = (e: React.MouseEvent): void => {
+  const handleBackdropMouseDown = (e: React.MouseEvent): void => {
     if (e.target === backdropRef.current) onClose()
   }
 
@@ -138,7 +138,7 @@ export function AddObligationModal({
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
-          onClick={handleBackdropClick}
+          onMouseDown={handleBackdropMouseDown}
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
         >
           <motion.div
