@@ -24,7 +24,7 @@ import type {
   ChangeLogEntry,
   ChangeLogCategory,
 } from '../types'
-import { computeSnapshot } from '../utils/financialEngine'
+import { computeSnapshot, formatLocalDate } from '../utils/financialEngine'
 import { pushHistory } from '../services/historyService'
 import { captureError, pushBreadcrumb } from '../services/errorRegistry'
 
@@ -332,6 +332,7 @@ export interface UseStoreReturn {
   addTransaction: (t: Omit<Transaction, 'id' | 'createdAt'>) => Promise<void>
   addManyTransactions: (ts: Transaction[]) => Promise<void>
   deleteTransaction: (id: string) => Promise<void>
+  updateTransactionComment: (id: string, comment: string) => Promise<void>
   addObligation: (o: Omit<Obligation, 'id' | 'createdAt'>, createdAt?: string) => Promise<Obligation>
   updateObligation: (id: string, updates: Partial<Obligation>) => Promise<void>
   deleteObligation: (id: string) => Promise<void>
@@ -547,6 +548,31 @@ export function useStore(): UseStoreReturn {
     [refresh]
   )
 
+  const updateTransactionComment = useCallback(
+    async (id: string, comment: string) => {
+      try {
+        pushBreadcrumb(`Комментарий к транзакции ${id}`)
+        const trimmed = comment.trim()
+        const patch: Partial<Transaction> = trimmed
+          ? { comment: trimmed }
+          : { comment: undefined }
+        await window.api.store.updateTransaction(id, patch)
+        setTransactions(current =>
+          current.map(t => (t.id === id ? { ...t, ...patch } : t))
+        )
+        await logChange(
+          'EDIT_TRANSACTION',
+          trimmed ? `Комментарий: ${trimmed.slice(0, 40)}` : 'Удалён комментарий',
+          'transaction'
+        )
+      } catch (e) {
+        captureError(e, 'ipc_error', 'updateTransactionComment')
+        throw e
+      }
+    },
+    []
+  )
+
   const addObligation = useCallback(
     async (o: Omit<Obligation, 'id' | 'createdAt'>, createdAt?: string): Promise<Obligation> => {
       try {
@@ -617,7 +643,7 @@ export function useStore(): UseStoreReturn {
           status,
           actualAmount: null,
           matchedTransactionId: transactionId,
-          paidDate: status === 'paid' ? new Date().toISOString().slice(0, 10) : undefined
+          paidDate: status === 'paid' ? formatLocalDate(new Date()) : undefined
         }
         await window.api.store.setObligationMonth(record)
         await logChange('SET_OBLIGATION_STATUS', `Статус обязательства → ${status}`, 'obligation')
@@ -1119,6 +1145,7 @@ export function useStore(): UseStoreReturn {
     addTransaction,
     addManyTransactions,
     deleteTransaction,
+    updateTransactionComment,
     addObligation,
     updateObligation,
     deleteObligation,

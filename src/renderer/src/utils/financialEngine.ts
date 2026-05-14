@@ -18,6 +18,14 @@ export function clampDayToMonth(year: number, month: number, day: number): numbe
   return Math.min(day, lastDay)
 }
 
+// Локальный YYYY-MM-DD без сдвига в UTC: new Date(2026,4,1).toISOString() в Берлине летом даёт '2026-04-30'.
+export function formatLocalDate(d: Date): string {
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
+}
+
 export function computeSnapshot(data: AppDataExtended): FinancialSnapshot {
   const warnings: SnapshotWarning[] = []
   const today = new Date()
@@ -104,7 +112,7 @@ export function computeSnapshot(data: AppDataExtended): FinancialSnapshot {
         id: o.id,
         name: o.name,
         amount: o.amount ?? 0,
-        dueDate: due.toISOString().split('T')[0],
+        dueDate: formatLocalDate(due),
         source: 'obligation' as const,
         billingChain: o.billingChain,
         riskFlag: false,
@@ -121,7 +129,7 @@ export function computeSnapshot(data: AppDataExtended): FinancialSnapshot {
         id: o.id,
         name: o.name,
         amount: o.amount ?? 0,
-        dueDate: due.toISOString().split('T')[0],
+        dueDate: formatLocalDate(due),
         source: 'klarna' as const,
         billingChain: 'klarna',
         riskFlag: false,

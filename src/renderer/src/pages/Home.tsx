@@ -13,6 +13,7 @@ import { ErrorRegistry } from '../components/ErrorRegistry'
 import { ErrorToastContainer } from '../components/ErrorToastContainer'
 import { HistoryModal } from '../components/HistoryModal'
 import { installGlobalErrorHandlers, setCurrentPage } from '../services/errorRegistry'
+import { formatLocalDate } from '../utils/financialEngine'
 
 
 type Page = 'home' | 'form' | 'import' | 'obligations'
@@ -39,6 +40,7 @@ export function Home(): React.JSX.Element {
     redoStack,
     loading,
     addTransaction,
+    updateTransactionComment,
     addManyTransactions,
     deleteTransaction,
     addObligation,
@@ -76,8 +78,8 @@ export function Home(): React.JSX.Element {
   const [splashDone, setSplashDone] = useState(false)
   const [period, setPeriod] = useState<Period>('this_month')
   const [customRange, setCustomRange] = useState<PeriodRange>({
-    from: new Date().toISOString().slice(0, 10),
-    to: new Date().toISOString().slice(0, 10)
+    from: formatLocalDate(new Date()),
+    to: formatLocalDate(new Date())
   })
 
   // Install global error handlers once
@@ -225,6 +227,7 @@ export function Home(): React.JSX.Element {
                 importHistory={importHistory}
                 onNavigateToImport={() => setPage('import')}
                 onAddTransaction={addTransaction}
+                onUpdateComment={updateTransactionComment}
               />
             </motion.div>
           )}

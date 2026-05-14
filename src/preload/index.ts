@@ -8,6 +8,8 @@ const api = {
     addMany: (transactions: unknown[]): Promise<void> =>
       ipcRenderer.invoke('store:addMany', transactions),
     delete: (id: string): Promise<void> => ipcRenderer.invoke('store:delete', id),
+    updateTransaction: (id: string, updates: unknown): Promise<void> =>
+      ipcRenderer.invoke('store:updateTransaction', id, updates),
     addObligation: (obligation: unknown): Promise<void> =>
       ipcRenderer.invoke('store:addObligation', obligation),
     updateObligation: (id: string, updates: unknown): Promise<void> =>

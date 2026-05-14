@@ -4,6 +4,7 @@ import { ChevronDown } from 'lucide-react'
 import type { Transaction } from '../types'
 import { Button } from './ui/button'
 import { SourceLogo } from './SourceLogo'
+import { formatLocalDate } from '../utils/financialEngine'
 
 interface TransactionFormProps {
   onSave: (t: Omit<Transaction, 'id' | 'createdAt'>) => Promise<void>
@@ -28,7 +29,7 @@ const fieldVariants = {
 }
 
 export function TransactionForm({ onSave }: TransactionFormProps): React.JSX.Element {
-  const [date, setDate] = useState(new Date().toISOString().slice(0, 10))
+  const [date, setDate] = useState(formatLocalDate(new Date()))
   const [amount, setAmount] = useState('')
   const [source, setSource] = useState<Transaction['source']>('Sparkasse')
   const [type, setType] = useState<Transaction['type']>('payment')

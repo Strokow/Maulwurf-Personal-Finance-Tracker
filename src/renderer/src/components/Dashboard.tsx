@@ -30,7 +30,9 @@ import {
   Redo2,
   Coins,
   ChevronLeft,
-  ChevronRight
+  ChevronRight,
+  MessageSquare,
+  MessageSquarePlus
 } from 'lucide-react'
 import type {
   Transaction,
@@ -44,6 +46,7 @@ import type {
   ImportRecord,
 } from '../types'
 import { PeriodSelector } from './PeriodSelector'
+import { formatLocalDate } from '../utils/financialEngine'
 import { Button } from './ui/button'
 import { SourceLogo } from './SourceLogo'
 import { ManualTransactionModal } from './ManualTransactionModal'
@@ -74,6 +77,7 @@ interface DashboardProps {
   importHistory?: ImportRecord[]
   onNavigateToImport?: () => void
   onAddTransaction?: (t: Omit<Transaction, 'id' | 'createdAt'>) => Promise<void>
+  onUpdateComment?: (id: string, comment: string) => Promise<void>
 }
 
 // --- Debt matching helpers ---
@@ -290,24 +294,24 @@ function getPeriodRange(period: Period, customRange: PeriodRange): PeriodRange {
     const from = new Date(now.getFullYear(), now.getMonth(), 1)
     const to = new Date(now.getFullYear(), now.getMonth() + 1, 0)
     return {
-      from: from.toISOString().slice(0, 10),
-      to: to.toISOString().slice(0, 10)
+      from: formatLocalDate(from),
+      to: formatLocalDate(to)
     }
   }
   if (period === 'last_month') {
     const from = new Date(now.getFullYear(), now.getMonth() - 1, 1)
     const to = new Date(now.getFullYear(), now.getMonth(), 0)
     return {
-      from: from.toISOString().slice(0, 10),
-      to: to.toISOString().slice(0, 10)
+      from: formatLocalDate(from),
+      to: formatLocalDate(to)
     }
   }
   if (period === 'month_before_last') {
     const from = new Date(now.getFullYear(), now.getMonth() - 2, 1)
     const to = new Date(now.getFullYear(), now.getMonth() - 1, 0)
     return {
-      from: from.toISOString().slice(0, 10),
-      to: to.toISOString().slice(0, 10)
+      from: formatLocalDate(from),
+      to: formatLocalDate(to)
     }
   }
   return customRange
@@ -331,13 +335,6 @@ function getTypeLabel(t: Transaction): string {
   return typeLabels[t.type]
 }
 
-const periodLabels: Record<Period, string> = {
-  this_month: 'Этот месяц',
-  last_month: 'Прошлый месяц',
-  month_before_last: 'Позапрошлый месяц',
-  custom: 'Произвольный'
-}
-
 export function Dashboard({
   transactions,
   debtResolutions,
@@ -359,6 +356,7 @@ export function Dashboard({
   importHistory,
   onNavigateToImport,
   onAddTransaction,
+  onUpdateComment,
 }: DashboardProps): React.JSX.Element {
   const range = getPeriodRange(period, customRange)
   const [expandDebts, setExpandDebts] = useState(false)
@@ -372,6 +370,8 @@ export function Dashboard({
   const [balanceInput, setBalanceInput] = useState('')
   const [showCashModal, setShowCashModal] = useState(false)
   const [hoveredGroupId, setHoveredGroupId] = useState<string | null>(null)
+  const [editingCommentId, setEditingCommentId] = useState<string | null>(null)
+  const [commentDraft, setCommentDraft] = useState('')
 
   // Available sources from all transactions
   const availableSources = useMemo(() => {
@@ -506,7 +506,7 @@ export function Dashboard({
     }[] = []
     for (let i = 0; i < 6; i++) {
       const d = new Date(year, halfStart + i, 1)
-      const monthStr = d.toISOString().slice(0, 7)
+      const monthStr = formatLocalDate(d).slice(0, 7)
       const label = d.toLocaleDateString('ru-RU', { month: 'short' })
       const monthTx = sourceTx.filter((t) => t.date.startsWith(monthStr))
       const incomeTx = monthTx.filter((t) => t.type === 'income')
@@ -1421,16 +1421,90 @@ export function Dashboard({
                         </span>
                       </td>
                       <td className={`px-4 py-2.5 transition-colors duration-300 ${descColor}`}>
-                        {tx.description || '–'}
+                        <div>{tx.description || '–'}</div>
+                        {tx.comment && editingCommentId !== tx.id && (
+                          <div className="mt-0.5 flex items-start gap-1 text-[11px] text-neutral-500 italic">
+                            <MessageSquare className="h-3 w-3 mt-0.5 shrink-0 text-blue-500/70" />
+                            <span className="truncate" title={tx.comment}>{tx.comment}</span>
+                          </div>
+                        )}
+                        {editingCommentId === tx.id && onUpdateComment && (
+                          <div className="mt-2 flex flex-col gap-1.5 rounded-md border border-neutral-700 bg-neutral-900 p-2">
+                            <textarea
+                              value={commentDraft}
+                              onChange={(e) => setCommentDraft(e.target.value)}
+                              autoFocus
+                              rows={2}
+                              maxLength={300}
+                              placeholder="Комментарий к транзакции..."
+                              className="w-full resize-none rounded bg-neutral-800 px-2 py-1 text-xs text-neutral-200 placeholder:text-neutral-600 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                              onKeyDown={(e) => {
+                                if (e.key === 'Escape') {
+                                  setEditingCommentId(null)
+                                } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+                                  e.preventDefault()
+                                  void onUpdateComment(tx.id, commentDraft).then(() => setEditingCommentId(null))
+                                }
+                              }}
+                            />
+                            <div className="flex items-center justify-between gap-2">
+                              <button
+                                type="button"
+                                onClick={() => setEditingCommentId(null)}
+                                className="text-[10px] text-neutral-500 hover:text-neutral-300"
+                              >
+                                Отмена
+                              </button>
+                              <div className="flex items-center gap-1.5">
+                                {tx.comment && (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      void onUpdateComment(tx.id, '').then(() => setEditingCommentId(null))
+                                    }}
+                                    className="rounded px-2 py-0.5 text-[10px] text-red-400 hover:bg-red-950/30"
+                                  >
+                                    Удалить
+                                  </button>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    void onUpdateComment(tx.id, commentDraft).then(() => setEditingCommentId(null))
+                                  }}
+                                  className="rounded bg-blue-600 px-2 py-0.5 text-[10px] font-medium text-white hover:bg-blue-500"
+                                >
+                                  Сохранить
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        )}
                       </td>
                       <td className="px-4 py-2.5">
                         <div
-                          className={`transition-opacity duration-300 ${
+                          className={`flex items-center gap-0.5 transition-opacity duration-300 ${
                             phase === 2 || phase === 3
                               ? isHovered ? 'opacity-100' : 'opacity-0 pointer-events-none'
                               : 'opacity-100'
                           }`}
                         >
+                          {onUpdateComment && (
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              onClick={() => {
+                                setEditingCommentId(editingCommentId === tx.id ? null : tx.id)
+                                setCommentDraft(tx.comment ?? '')
+                              }}
+                              title={tx.comment ? 'Редактировать комментарий' : 'Добавить комментарий'}
+                            >
+                              {tx.comment
+                                ? <MessageSquare className="h-4 w-4 text-blue-400 transition-colors duration-200 hover:text-blue-300" />
+                                : <MessageSquarePlus className="h-4 w-4 text-neutral-500 transition-colors duration-200 hover:text-blue-400" />
+                              }
+                            </Button>
+                          )}
                           <Button variant="ghost" size="icon" onClick={() => onDelete(tx.id)}>
                             <Trash2 className="h-4 w-4 text-neutral-500 transition-colors duration-200 hover:text-red-400" />
                           </Button>

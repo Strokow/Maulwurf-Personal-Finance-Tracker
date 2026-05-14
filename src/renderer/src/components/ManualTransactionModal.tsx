@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { X, Plus } from 'lucide-react'
 import type { Transaction } from '../types'
 import { Button } from './ui/button'
+import { formatLocalDate } from '../utils/financialEngine'
 
 interface ManualTransactionModalProps {
   isOpen: boolean
@@ -15,7 +16,7 @@ export function ManualTransactionModal({
   onClose,
   onSave
 }: ManualTransactionModalProps): React.JSX.Element {
-  const [date, setDate] = useState(new Date().toISOString().slice(0, 10))
+  const [date, setDate] = useState(formatLocalDate(new Date()))
   const [amount, setAmount] = useState('')
   const [description, setDescription] = useState('')
   const [saving, setSaving] = useState(false)
@@ -55,7 +56,7 @@ export function ManualTransactionModal({
       })
       
       // Reset form
-      setDate(new Date().toISOString().slice(0, 10))
+      setDate(formatLocalDate(new Date()))
       setAmount('')
       setDescription('')
       setErrors({})

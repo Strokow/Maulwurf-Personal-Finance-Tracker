@@ -252,6 +252,16 @@ app.whenReady().then(() => {
     )
   })
 
+  // IPC: update transaction (partial)
+  ipcMain.handle('store:updateTransaction', (_event, id: string, updates: Partial<Transaction>) => {
+    const transactions = store.get('transactions', [])
+    const idx = transactions.findIndex((t) => t.id === id)
+    if (idx !== -1) {
+      transactions[idx] = { ...transactions[idx], ...updates }
+      store.set('transactions', transactions)
+    }
+  })
+
   // IPC: clear all transactions + obligationMonths
   ipcMain.handle('store:clearAll', () => {
     store.set('transactions', [])

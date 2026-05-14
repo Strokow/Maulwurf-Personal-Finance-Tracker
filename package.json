@@ -1,6 +1,6 @@
 {
   "name": "finance-tracker",
-  "version": "1.0.3",
+  "version": "1.1.0",
   "description": "Desktop finance tracker for personal banking in Germany — import, obligations, AI analysis via local Ollama.",
   "main": "./out/main/index.js",
   "author": "Strokow",

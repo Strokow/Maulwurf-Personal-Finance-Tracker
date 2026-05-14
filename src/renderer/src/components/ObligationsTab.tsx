@@ -29,7 +29,7 @@ import type {
 } from '../types'
 import { ObligationCard } from './ObligationCard'
 import { AddObligationModal } from './AddObligationModal'
-import { clampDayToMonth } from '../utils/financialEngine'
+import { clampDayToMonth, formatLocalDate } from '../utils/financialEngine'
 
 interface ObligationsTabProps {
   obligations: Obligation[]
@@ -107,7 +107,7 @@ export function ObligationsTab({
   const [klarnaAddOpen, setKlarnaAddOpen] = useState(false)
   const [klarnaPaymentType, setKlarnaPaymentType] = useState<'installment' | 'single'>('installment')
   const [klarnaPasteText, setKlarnaPasteText] = useState('')
-  const [klarnaGenDate, setKlarnaGenDate] = useState(() => new Date().toISOString().slice(0, 10))
+  const [klarnaGenDate, setKlarnaGenDate] = useState(() => formatLocalDate(new Date()))
   const [klarnaAddMerchant, setKlarnaAddMerchant] = useState('')
   const [klarnaAddTotal, setKlarnaAddTotal] = useState('')
   const [klarnaAddMonthly, setKlarnaAddMonthly] = useState('')
@@ -116,7 +116,7 @@ export function ObligationsTab({
   const [klarnaAddNextDate, setKlarnaAddNextDate] = useState(() => {
     const d = new Date()
     d.setMonth(d.getMonth() + 1)
-    return d.toISOString().slice(0, 10)
+    return formatLocalDate(d)
   })
   const [klarnaAddSaving, setKlarnaAddSaving] = useState(false)
   const [klarnaParseError, setKlarnaParseError] = useState('')
@@ -348,6 +348,9 @@ export function ObligationsTab({
 
   const totalMonthlyFiltered = useMemo(() => {
     return filtered.reduce((sum, o) => {
+      // Долг перенесён ИЗ этого месяца → исключаем полностью
+      if (carryDestMap.has(o.id)) return sum
+
       const rec = getMonthRecord(o.id, year, month)
 
       // Yearly: skip if covered or not due this month
@@ -374,7 +377,7 @@ export function ObligationsTab({
 
       return sum + base
     }, 0)
-  }, [filtered, isYearlyCovered, getMonthRecord, year, month, getEffectiveStatus])
+  }, [filtered, isYearlyCovered, getMonthRecord, year, month, getEffectiveStatus, carryDestMap])
 
   const totalPaidFiltered = useMemo(() => {
     return filtered.reduce((sum, o) => {
@@ -418,6 +421,8 @@ export function ObligationsTab({
   }).length
 
   const pendingCount = filtered.filter((o) => {
+    // Долг перенесён ИЗ этого месяца → больше не "ожидает оплаты" здесь
+    if (carryDestMap.has(o.id)) return false
     if (o.frequency === 'yearly') {
       if (isYearlyCovered(o)) return false           // already covered
       if (o.yearlyMonth != null && o.yearlyMonth !== month) return false
@@ -656,7 +661,7 @@ export function ObligationsTab({
     setKlarnaAddMonthly(monthly.toFixed(2))
     setKlarnaAddTotalInst(String(total))
     setKlarnaAddPaidInst(String(paid))
-    setKlarnaAddNextDate(isSingle ? '' : nextDate.toISOString().slice(0, 10))
+    setKlarnaAddNextDate(isSingle ? '' : formatLocalDate(nextDate))
     return ''
   }
 
@@ -738,7 +743,7 @@ export function ObligationsTab({
       setKlarnaAddMerchant(''); setKlarnaAddTotal(''); setKlarnaAddMonthly('')
       setKlarnaAddTotalInst(''); setKlarnaAddPaidInst('0')
       setKlarnaPaymentType('installment')
-      setKlarnaGenDate(new Date().toISOString().slice(0, 10))
+      setKlarnaGenDate(formatLocalDate(new Date()))
     } catch (e) {
       setKlarnaSaveError('Не удалось сохранить: ' + (e instanceof Error ? e.message : 'неизвестная ошибка'))
     } finally {
@@ -810,7 +815,7 @@ export function ObligationsTab({
         status,
         actualAmount: currentRecord?.actualAmount ?? null,
         matchedTransactionId: currentRecord?.matchedTransactionId,
-        paidDate: status === 'paid' ? new Date().toISOString().slice(0, 10) : undefined
+        paidDate: status === 'paid' ? formatLocalDate(new Date()) : undefined
       }
       let afterMonths = obligationMonths.filter(
         m => !(m.obligationId === obligationId && m.year === year && m.month === month)
@@ -825,7 +830,7 @@ export function ObligationsTab({
           month,
           status,
           actualAmount: null,
-          paidDate: status === 'paid' ? new Date().toISOString().slice(0, 10) : undefined
+          paidDate: status === 'paid' ? formatLocalDate(new Date()) : undefined
         })
       }
       // Also include carryover months in undo state
@@ -838,7 +843,7 @@ export function ObligationsTab({
           month: m,
           status: 'paid',
           actualAmount: null,
-          paidDate: new Date().toISOString().slice(0, 10)
+          paidDate: formatLocalDate(new Date())
         })
       }
       const afterState = { obligationMonths: afterMonths }
@@ -1188,25 +1193,28 @@ export function ObligationsTab({
 
   const handleExportPDF = useCallback(async () => {
     const fmtEur = (n: number): string => n.toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })
-    const statusLabel = (s: ObligationStatus): string =>
-      s === 'paid' ? '✅ Оплачено' : s === 'unpaid' ? '❌ Не оплачено' : '❓ Неизвестно'
+    const statusBadge = (s: ObligationStatus): string => {
+      const map = {
+        paid: { color: '#16a34a', text: 'Оплачено' },
+        unpaid: { color: '#dc2626', text: 'Не оплачено' },
+        unknown: { color: '#6b7280', text: 'Неизвестно' },
+        skipped: { color: '#6b7280', text: 'Пропущено' },
+      } as const
+      const { color, text } = map[s] ?? map.unknown
+      return `<span style="color:${color};font-weight:600">${text}</span>`
+    }
     const freqLabel = (f?: ObligationFrequency): string =>
       f === 'yearly' ? 'Ежегодный' : f === 'once' ? 'Единоразовый' : 'Ежемесячный'
 
     const renderGroup = (title: string, items: Obligation[]): string => {
       if (items.length === 0) return ''
-      const groupTotal = items.reduce((s, o) => {
-        const rec = getMonthRecord(o.id, year, month)
-        if (rec?.status === 'paid') return s
-        if (rec && rec.status === 'unknown') return s
-        if (!rec && !carryoverMap.has(o.id)) return s
-        return s + (o.amount ?? 0) + (carryoverMap.get(o.id)?.totalDebt ?? 0)
-      }, 0)
       const rows = items.map(o => {
         const rec = getMonthRecord(o.id, year, month)
         const carry = carryoverMap.get(o.id)
         const isYC = o.frequency === 'yearly' && yearlyPaidUntilMap.has(o.id)
-        const st = isYC ? 'paid' : (rec?.status ?? (carry ? 'unpaid' : 'unknown')) as ObligationStatus
+        const st = isYC
+          ? 'paid'
+          : (rec?.status ?? ((!o.frequency || o.frequency === 'monthly') ? 'unpaid' : 'unknown')) as ObligationStatus
         const amt = o.amount !== null ? fmtEur(o.amount) : '—'
         const carryColor = carry?.resolved ? '#4ade80' : '#d97706'
         const carryStr = carry ? ` <span style="color:${carryColor}">+ долг ${fmtEur(carry.totalDebt)} (${carry.months} мес.)</span>` : ''
@@ -1216,7 +1224,7 @@ export function ObligationsTab({
           <td style="padding:8px 12px;border-bottom:1px solid #ddd">${freqLabel(o.frequency)}</td>
           <td style="padding:8px 12px;border-bottom:1px solid #ddd">${amt}${carryStr}</td>
           <td style="padding:8px 12px;border-bottom:1px solid #ddd">${dayStr}</td>
-          <td style="padding:8px 12px;border-bottom:1px solid #ddd">${statusLabel(st)}</td>
+          <td style="padding:8px 12px;border-bottom:1px solid #ddd">${statusBadge(st)}</td>
           <td style="padding:8px 12px;border-bottom:1px solid #ddd;color:#666">${o.notes ?? ''}</td>
         </tr>`
       }).join('')
@@ -1231,11 +1239,6 @@ export function ObligationsTab({
             <th style="padding:8px 12px">Заметки</th>
           </tr></thead>
           <tbody>${rows}</tbody>
-          <tfoot><tr style="font-weight:bold;border-top:2px solid #999">
-            <td style="padding:8px 12px" colspan="2">К оплате:</td>
-            <td style="padding:8px 12px">${fmtEur(groupTotal)}</td>
-            <td colspan="3"></td>
-          </tr></tfoot>
         </table>`
     }
 
@@ -1272,11 +1275,12 @@ export function ObligationsTab({
     </div>
     <div class="stat">
       <div class="stat-label">Оплачено</div>
-      <div class="stat-value" style="color:#4ade80">${paidCount}</div>
+      <div class="stat-value" style="color:#16a34a">${fmtEur(totalPaidFiltered)}</div>
+      <div style="font-size:12px;color:#666;margin-top:4px">${paidCount} ${paidCount === 1 ? 'позиция' : 'позиций'}</div>
     </div>
     <div class="stat">
       <div class="stat-label">Ожидают оплаты</div>
-      <div class="stat-value" style="color:${pendingCount > 0 ? '#f87171' : '#4ade80'}">${pendingCount}</div>
+      <div class="stat-value" style="color:${pendingCount > 0 ? '#dc2626' : '#16a34a'}">${pendingCount}</div>
     </div>
   </div>
   ${renderGroup('Ежемесячные', monthlyObligations)}
@@ -1287,7 +1291,7 @@ export function ObligationsTab({
 </html>`
 
     await window.api.exportPdf(html, `Обязательства_${year}_${String(month).padStart(2, '0')}.pdf`)
-  }, [filtered, sorted, monthlyObligations, yearlyObligations, onceObligations, customSections, getMonthRecord, year, month, currentMonthLabel, totalMonthlyFiltered, paidCount, pendingCount, carryoverMap, carryoverFiltered, yearlyPaidUntilMap])
+  }, [filtered, sorted, monthlyObligations, yearlyObligations, onceObligations, customSections, getMonthRecord, year, month, currentMonthLabel, totalMonthlyFiltered, totalPaidFiltered, paidCount, pendingCount, carryoverMap, carryoverFiltered, yearlyPaidUntilMap])
 
   return (
     <div className="space-y-6">

@@ -23,6 +23,7 @@ interface StoreAPI {
   add: (transaction: unknown) => Promise<void>
   addMany: (transactions: unknown[]) => Promise<void>
   delete: (id: string) => Promise<void>
+  updateTransaction: (id: string, updates: unknown) => Promise<void>
   addObligation: (obligation: unknown) => Promise<void>
   updateObligation: (id: string, updates: unknown) => Promise<void>
   deleteObligation: (id: string) => Promise<void>

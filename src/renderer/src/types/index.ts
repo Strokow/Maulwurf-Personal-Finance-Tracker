@@ -9,6 +9,7 @@ export interface Transaction {
   sparkasseType?: 'ruecklastschrift' | 'wiedergutschrift' | 'entgelt' | 'normal'
   paymentChain?: 'sparkasse_direct' | 'paypal' | 'vodafone_contract' | 'klarna' | 'revolut_paypal'
   description?: string
+  comment?: string
   batchId?: string
   paymentGroupId?: string
   createdAt: string
