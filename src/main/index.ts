@@ -680,6 +680,16 @@ app.whenReady().then(() => {
     return { success: true, filePath }
   })
 
+  ipcMain.handle('export:md', async (_event, content: string, defaultName: string) => {
+    const { canceled, filePath } = await dialog.showSaveDialog({
+      defaultPath: defaultName,
+      filters: [{ name: 'Markdown', extensions: ['md'] }]
+    })
+    if (canceled || !filePath) return { success: false }
+    await writeFile(filePath, content, 'utf-8')
+    return { success: true, filePath }
+  })
+
   app.on('activate', function () {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })

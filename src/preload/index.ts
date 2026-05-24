@@ -74,6 +74,8 @@ const api = {
   },
   exportPdf: (html: string, defaultName: string): Promise<{ success: boolean; filePath?: string }> =>
     ipcRenderer.invoke('export:pdf', html, defaultName),
+  exportMd: (content: string, defaultName: string): Promise<{ success: boolean; filePath?: string }> =>
+    ipcRenderer.invoke('export:md', content, defaultName),
   pin: {
     verify: (pin: string): Promise<unknown> => ipcRenderer.invoke('pin:verify', pin),
     set: (pin: string): Promise<unknown> => ipcRenderer.invoke('pin:set', pin),

@@ -76,6 +76,7 @@ declare global {
       pin: PinAPI
       backup: BackupAPI
       exportPdf: (html: string, defaultName: string) => Promise<{ success: boolean; filePath?: string }>
+      exportMd: (content: string, defaultName: string) => Promise<{ success: boolean; filePath?: string }>
     }
   }
 }

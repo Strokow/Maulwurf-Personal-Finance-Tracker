@@ -51,13 +51,14 @@ export function PinLock({ onUnlock, onSetup, onDisable, status, isGate = false }
     return undefined
   }, [status.locked, status.lockoutUntil])
 
-  const handleVerify = async () => {
-    if (inputPin.length !== 6) {
+  const handleVerify = async (pin?: string) => {
+    const pinToVerify = pin ?? inputPin
+    if (pinToVerify.length !== 6) {
       setError('PIN должен содержать 6 цифр')
       return
     }
     try {
-      const result = await window.api.pin.verify(inputPin) as {
+      const result = await window.api.pin.verify(pinToVerify) as {
         success: boolean
         locked: boolean
         attemptsLeft: number
@@ -215,8 +216,10 @@ export function PinLock({ onUnlock, onSetup, onDisable, status, isGate = false }
                 maxLength={6}
                 value={inputPin}
                 onChange={(e) => {
-                  setInputPin(e.target.value.replace(/\D/g, '').slice(0, 6))
+                  const val = e.target.value.replace(/\D/g, '').slice(0, 6)
+                  setInputPin(val)
                   setError('')
+                  if (val.length === 6) handleVerify(val)
                 }}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' && inputPin.length === 6) {
@@ -228,7 +231,7 @@ export function PinLock({ onUnlock, onSetup, onDisable, status, isGate = false }
               />
               <button
                 type="button"
-                onClick={handleVerify}
+                onClick={() => handleVerify()}
                 disabled={inputPin.length !== 6}
                 className="w-full rounded bg-green-900/50 py-2.5 text-sm font-medium text-green-300 hover:bg-green-900 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
               >
@@ -314,7 +317,7 @@ export function PinLock({ onUnlock, onSetup, onDisable, status, isGate = false }
                 0
               </button>
               <button
-                onClick={mode === 'verify' ? handleVerify : mode === 'setup' ? handleSetup : handleDisable}
+                onClick={mode === 'verify' ? () => handleVerify() : mode === 'setup' ? handleSetup : handleDisable}
                 className="h-14 rounded-lg bg-green-900/50 text-green-300 hover:bg-green-900 transition-colors font-medium"
               >
                 OK

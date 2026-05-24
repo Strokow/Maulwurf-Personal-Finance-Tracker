@@ -1191,6 +1191,56 @@ export function ObligationsTab({
     )
   }, [childrenMap, linkDropTarget, childAreaDropTarget, handleDragStart, handleDrag, handleDragEnd, handleCardDragOver, handleCardDragLeave, handleCardDrop, handleChildAreaDragOver, handleChildAreaDragLeave, handleChildAreaDrop, getMonthRecord, year, month, carryoverMap, carryDestMap, yearlyPaidUntilMap, handleEdit, handleDelete, handleStatusToggle, handleCopyToMonth, handleUnlink, klarnaPaidCountMap, onCarryDebt, handlePayCarried, handlePayAll])
 
+  const handleExportMD = useCallback(async () => {
+    const fmtEur = (n: number): string => n.toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })
+    const statusLabel = (s: ObligationStatus): string =>
+      ({ paid: 'Оплачено', unpaid: 'Не оплачено', unknown: 'Неизвестно', skipped: 'Пропущено' }[s] ?? 'Неизвестно')
+    const freqLabel = (f?: ObligationFrequency): string =>
+      f === 'yearly' ? 'Ежегодный' : f === 'once' ? 'Единоразовый' : 'Ежемесячный'
+
+    const renderGroupMd = (title: string, items: Obligation[]): string => {
+      if (items.length === 0) return ''
+      const rows = items.map(o => {
+        const rec = getMonthRecord(o.id, year, month)
+        const carry = carryoverMap.get(o.id)
+        const isYC = o.frequency === 'yearly' && yearlyPaidUntilMap.has(o.id)
+        const st = isYC
+          ? 'paid'
+          : (rec?.status ?? ((!o.frequency || o.frequency === 'monthly') ? 'unpaid' : 'unknown')) as ObligationStatus
+        const amt = o.amount !== null ? fmtEur(o.amount) : '—'
+        const carryStr = carry ? ` + долг ${fmtEur(carry.totalDebt)} (${carry.months} мес.)` : ''
+        const dayStr = o.approximateDay !== null ? `~${o.approximateDay}` : ''
+        const notes = (o.notes ?? '').replace(/\|/g, '\\|')
+        return `| ${o.name} | ${freqLabel(o.frequency)} | ${amt}${carryStr} | ${dayStr} | ${statusLabel(st)} | ${notes} |`
+      }).join('\n')
+      return `\n## ${title} (${items.length})\n\n| Название | Период | Сумма | Дата | Статус | Заметки |\n|---|---|---|---|---|---|\n${rows}\n`
+    }
+
+    const allCustomMd = customSections
+      .map(s => renderGroupMd(s.name, sorted.filter(o => o.sectionId === s.id)))
+      .join('')
+
+    const md = [
+      `# Обязательства — ${currentMonthLabel}`,
+      ``,
+      `Сгенерировано: ${new Date().toLocaleString('ru-RU')}`,
+      ``,
+      `## Итого`,
+      ``,
+      `| Показатель | Значение |`,
+      `|---|---|`,
+      `| Итого к оплате | ${fmtEur(totalMonthlyFiltered)}${carryoverFiltered.total > 0 ? ` (вкл. долг: ${fmtEur(carryoverFiltered.total)})` : ''} |`,
+      `| Оплачено | ${fmtEur(totalPaidFiltered)} (${paidCount} поз.) |`,
+      `| Ожидают оплаты | ${pendingCount} |`,
+      renderGroupMd('Ежемесячные', monthlyObligations),
+      renderGroupMd('Ежегодные', yearlyObligations),
+      renderGroupMd('Единоразовые', onceObligations),
+      allCustomMd,
+    ].join('\n')
+
+    await window.api.exportMd(md, `Обязательства_${year}_${String(month).padStart(2, '0')}.md`)
+  }, [filtered, sorted, monthlyObligations, yearlyObligations, onceObligations, customSections, getMonthRecord, year, month, currentMonthLabel, totalMonthlyFiltered, totalPaidFiltered, paidCount, pendingCount, carryoverMap, carryoverFiltered, yearlyPaidUntilMap])
+
   const handleExportPDF = useCallback(async () => {
     const fmtEur = (n: number): string => n.toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })
     const statusBadge = (s: ObligationStatus): string => {
@@ -1337,6 +1387,14 @@ export function ObligationsTab({
           >
             <Redo2 className="h-4 w-4" />
             Повторить
+          </button>
+          <button
+            onClick={handleExportMD}
+            className="flex items-center gap-1 px-2 py-1 text-xs rounded bg-neutral-800 text-neutral-400 hover:text-neutral-200"
+            title="Скачать MD"
+          >
+            <Download className="h-4 w-4" />
+            MD
           </button>
           <button
             onClick={handleExportPDF}
