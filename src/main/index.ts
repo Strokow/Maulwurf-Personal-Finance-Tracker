@@ -2,7 +2,7 @@ import { app, shell, BrowserWindow, ipcMain, Menu, dialog } from 'electron'
 import { join } from 'path'
 import { writeFile, readFile, readdir, mkdir, unlink, stat } from 'fs/promises'
 import { optimizer, is } from '@electron-toolkit/utils'
-import icon from '../../resources/maulwurficon.png?asset'
+import icon from '../../resources/maulwurficonISO.ico?asset'
 import Store from 'electron-store'
 import { checkAndNotify } from './notificationService'
 import { hashPin, verifyPin } from './pinService'
@@ -118,7 +118,7 @@ function createWindow(): void {
     minHeight: 800,
     show: false,
     autoHideMenuBar: true,
-    title: 'Finance Tracker',
+    title: 'Maulwurf',
     backgroundColor: '#0f0f0f',
     icon,
     webPreferences: {
@@ -165,7 +165,7 @@ function createWindow(): void {
 }
 
 app.whenReady().then(() => {
-  app.setAppUserModelId('com.finance-tracker')
+  app.setAppUserModelId('com.strokow.maulwurf-finance-tracker')
 
   // Enable copy/paste/cut/selectAll via menu (needed for Electron)
   const template: Electron.MenuItemConstructorOptions[] = [

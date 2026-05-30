@@ -14,12 +14,12 @@ export function checkAndNotify(snapshot: FinancialSnapshot | null): void {
   const risky = urgent.filter((p) => p.riskFlag)
   if (risky.length > 0) {
     new Notification({
-      title: '⚠️ Finance Tracker — риск просрочки',
+      title: '⚠️ Maulwurf — риск просрочки',
       body: `${risky[0].name}: ${risky[0].amount}€ к ${risky[0].dueDate}. Проверь баланс.`,
     }).show()
   } else {
     new Notification({
-      title: 'Finance Tracker — платежи на этой неделе',
+      title: 'Maulwurf — платежи на этой неделе',
       body: urgent.map((p) => `${p.name} ${p.amount}€`).join(' · '),
     }).show()
   }

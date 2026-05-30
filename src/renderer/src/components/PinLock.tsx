@@ -22,6 +22,9 @@ export function PinLock({ onUnlock, onSetup, onDisable, status, isGate = false }
   const [mode, setMode] = useState<'verify' | 'setup' | 'disable'>('verify')
   const [error, setError] = useState('')
   const [countdown, setCountdown] = useState('')
+  // Кнопка «Войти» на gate-экране появляется только после неверного ввода.
+  // При первом вводе вход происходит автоматически по достижении 6 цифр.
+  const [showLoginBtn, setShowLoginBtn] = useState(false)
   const gateInputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
@@ -67,9 +70,11 @@ export function PinLock({ onUnlock, onSetup, onDisable, status, isGate = false }
       if (result.success) {
         onUnlock()
       } else if (result.locked) {
+        setShowLoginBtn(true)
         setError('Слишком много попыток. Попробуйте позже.')
       } else {
-        setError(`Неверный PIN. Осталось попыток: ${result.attemptsLeft}`)
+        setShowLoginBtn(true)
+        setError('Неверный PIN')
       }
     } catch (e) {
       setError(`Ошибка: ${e instanceof Error ? e.message : String(e)}`)
@@ -229,14 +234,16 @@ export function PinLock({ onUnlock, onSetup, onDisable, status, isGate = false }
                 className="w-full rounded border border-neutral-700 bg-neutral-800 px-3 py-3 text-center text-2xl tracking-[0.5em] text-neutral-200 mb-4 focus:border-green-600 focus:outline-none"
                 placeholder="••••••"
               />
-              <button
-                type="button"
-                onClick={() => handleVerify()}
-                disabled={inputPin.length !== 6}
-                className="w-full rounded bg-green-900/50 py-2.5 text-sm font-medium text-green-300 hover:bg-green-900 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-              >
-                Войти
-              </button>
+              {showLoginBtn && (
+                <button
+                  type="button"
+                  onClick={() => handleVerify()}
+                  disabled={inputPin.length !== 6}
+                  className="w-full rounded bg-green-900/50 py-2.5 text-sm font-medium text-green-300 hover:bg-green-900 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                >
+                  Войти
+                </button>
+              )}
               {error && (
                 <p className="text-sm text-red-400 text-center mt-4 flex items-center justify-center gap-2">
                   <AlertTriangle className="h-4 w-4" />

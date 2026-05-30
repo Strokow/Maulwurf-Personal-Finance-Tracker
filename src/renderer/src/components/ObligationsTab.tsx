@@ -518,12 +518,16 @@ export function ObligationsTab({
           const created = new Date(editTarget.createdAt)
           const sYear = created.getFullYear()
           const sMonth = created.getMonth() + 1
+          // future-paid guard: нельзя помечать 'оплачено' месяцы позже текущего реального
+          const realNow = new Date()
+          const curYM = realNow.getFullYear() * 12 + (realNow.getMonth() + 1)
 
           // Mark months that should be paid
           for (let i = 0; i < klarnaPaidInstallments; i++) {
             let mYear = sYear
             let mMonth = sMonth + i
             while (mMonth > 12) { mMonth -= 12; mYear++ }
+            if (mYear * 12 + mMonth > curYM) break
             const existing = obligationMonths.find(
               (m) => m.obligationId === editTarget.id && m.year === mYear && m.month === mMonth
             )
@@ -728,10 +732,14 @@ export function ObligationsTab({
           originalTotal: isNaN(originalTotal) ? undefined : originalTotal,
         }, createdAt)
 
+        // future-paid guard: нельзя помечать 'оплачено' месяцы позже текущего реального
+        const realNow = new Date()
+        const curYM = realNow.getFullYear() * 12 + (realNow.getMonth() + 1)
         for (let i = 0; i < safePaid; i++) {
           let paidYear = npYear
           let paidMonth = npMonthNum - safePaid + i
           while (paidMonth <= 0) { paidMonth += 12; paidYear-- }
+          if (paidYear * 12 + paidMonth > curYM) break
           await onStatusChange(newObligation.id, paidYear, paidMonth, 'paid')
         }
       }
