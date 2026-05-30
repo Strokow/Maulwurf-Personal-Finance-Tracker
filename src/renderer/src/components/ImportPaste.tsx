@@ -53,8 +53,8 @@ YYYY-MM-DD | СУММА | ТИП | Sparkasse | ОПИСАНИЕ | SPARKASSE_TYP 
 ПРИМЕР ТРОЙКИ (PYUR 41,43 EUR списание которое вернулось):
 
 В выписке присутствуют три связанные записи:
-  01.04.2026 | −41,43 | FOLGELASTSCHRIFT | PYUR Vertrieb + Service GmbH | KD-NR . 00008933622
-  02.04.2026 | +41,43 | LS WIEDERGUTSCHRIFT | PYUR Vertrieb + Service GmbH | KD-NR . 00008933622
+  01.04.2026 | −41,43 | FOLGELASTSCHRIFT | PYUR Vertrieb + Service GmbH | KD-NR . 00001234567
+  02.04.2026 | +41,43 | LS WIEDERGUTSCHRIFT | PYUR Vertrieb + Service GmbH | KD-NR . 00001234567
   02.04.2026 | −1,50  | RECHNUNG | Rechnung Rückgabe Lastschrift über 41,43 EUR Einreicher: PYUR ...
 
 Выход:
@@ -70,7 +70,7 @@ YYYY-MM-DD | СУММА | ТИП | Sparkasse | ОПИСАНИЕ | SPARKASSE_TYP 
 2026-03-19 | 1.50 | penalty | Sparkasse | agencio Rückgabe [bank] | entgelt | sparkasse_direct | G1
 2026-03-02 | 94.95 | payment | Sparkasse | Vodafone Apple Pay | normal | vodafone_contract | G5
 2026-03-05 | 13.98 | payment | Sparkasse | Netflix PayPal | normal | paypal | G6
-2026-03-02 | 100.00 | income | Sparkasse | Amelie Gutschrift | normal | sparkasse_direct | G7
+2026-03-02 | 100.00 | income | Sparkasse | Max Mustermann Gutschrift | normal | sparkasse_direct | G7
 
 === ANALYTICS ===
 Краткая аналитика: всего платежей, неудачных, комиссии, реальные потери.
