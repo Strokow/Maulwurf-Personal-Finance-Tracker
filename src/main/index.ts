@@ -95,7 +95,9 @@ interface StoreSchema {
   changeLog: ChangeLogEntry[]
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 const store = new Store<StoreSchema>({
+  // @ts-ignore - projectName is valid at runtime but missing from electron-store typedefs
   projectName: 'finance-tracker',
   defaults: {
     transactions: [],
@@ -475,35 +477,40 @@ app.whenReady().then(() => {
 
   // IPC: new extended store methods
   ipcMain.handle('store:addError', (_event, record: unknown) => {
-    const errors = store.get('errorRegistry', [])
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const errors = (store as any).get('errorRegistry', []) as unknown[]
     errors.unshift(record)
-    store.set('errorRegistry', errors.slice(0, 100))
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(store as any).set('errorRegistry', errors.slice(0, 100))
   })
 
   ipcMain.handle('store:updateError', (_event, id: string, updates: unknown) => {
-    const errors = store.get('errorRegistry', [])
-    const idx = errors.findIndex((e: { id: string }) => e.id === id)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const errors = (store as any).get('errorRegistry', []) as { id: string; [k: string]: unknown }[]
+    const idx = errors.findIndex((e) => e.id === id)
     if (idx !== -1) {
-      errors[idx] = { ...errors[idx], ...updates }
-      store.set('errorRegistry', errors)
+      errors[idx] = { ...errors[idx], ...(updates as object) }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(store as any).set('errorRegistry', errors)
     }
   })
 
   // IPC: drop all resolved errors (BUG-006)
   ipcMain.handle('store:clearResolvedErrors', () => {
-    const errors = store.get('errorRegistry', [])
-    store.set(
-      'errorRegistry',
-      errors.filter((e: { resolved?: boolean }) => !e.resolved)
-    )
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const errors = (store as any).get('errorRegistry', []) as { resolved?: boolean }[]
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(store as any).set('errorRegistry', errors.filter((e) => !e.resolved))
   })
 
   ipcMain.handle('store:updateAccountBalance', (_event, balance: unknown) => {
-    const balances = store.get('accountBalances', [])
-    const idx = balances.findIndex((b: { id: string }) => b.id === (balance as { id: string }).id)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const balances = (store as any).get('accountBalances', []) as { id: string; [k: string]: unknown }[]
+    const idx = balances.findIndex((b) => b.id === (balance as { id: string }).id)
     if (idx !== -1) {
-      balances[idx] = { ...balances[idx], ...balance }
-      store.set('accountBalances', balances)
+      balances[idx] = { ...balances[idx], ...(balance as object) }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(store as any).set('accountBalances', balances)
     }
   })
 

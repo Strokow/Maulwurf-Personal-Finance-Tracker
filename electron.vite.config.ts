@@ -20,6 +20,7 @@ export default defineConfig({
       }
     },
     plugins: [react()],
+    // @ts-ignore - vitest test config is not in electron-vite renderer type
     test: {
       globals: true,
       environment: 'jsdom',

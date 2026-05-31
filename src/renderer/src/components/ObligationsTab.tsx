@@ -555,7 +555,13 @@ export function ObligationsTab({
       }
     } else {
       const beforeObligations = [...obligations]
-      const newObligation = await onAdd(o)
+      // If viewing a future month, set createdAt to that month so once-obligations appear there
+      const realNow = new Date()
+      const realYear = realNow.getFullYear()
+      const realMonth = realNow.getMonth() + 1
+      const isViewingFuture = year > realYear || (year === realYear && month > realMonth)
+      const futureCreatedAt = isViewingFuture ? new Date(year, month - 1, 1).toISOString() : undefined
+      const newObligation = await onAdd(o, futureCreatedAt)
       // Auto-set status to 'unpaid' for the current month so it appears correctly
       await onStatusChange(newObligation.id, year, month, 'unpaid')
       if (pushUndo) {

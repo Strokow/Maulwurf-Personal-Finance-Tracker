@@ -32,7 +32,8 @@ import {
   ChevronLeft,
   ChevronRight,
   MessageSquare,
-  MessageSquarePlus
+  MessageSquarePlus,
+  Download,
 } from 'lucide-react'
 import type {
   Transaction,
@@ -587,6 +588,109 @@ export function Dashboard({
   }
 
   const fmt = (n: number) => n.toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })
+
+  const handleExportMD = useCallback(async () => {
+    const fmtEur = (n: number) => n.toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })
+    const esc = (s: string) => s.replace(/\|/g, '\\|').replace(/\n/g, ' ')
+    const periodLabel = `${range.from} — ${range.to}`
+    const lines: string[] = []
+    const ln = (...args: string[]) => lines.push(...args)
+
+    ln(`# Транзакции — ${periodLabel}`)
+    ln(``)
+    ln(`> Сгенерировано: ${new Date().toLocaleString('ru-RU')}`)
+    ln(``)
+    ln(`---`)
+    ln(``)
+    ln(`## Сводка`)
+    ln(``)
+    ln(`| Показатель | Значение |`)
+    ln(`|---|---|`)
+    ln(`| Период | ${periodLabel} |`)
+    ln(`| Всего транзакций | ${filtered.length} |`)
+    ln(`| Доходы | ${fmtEur(cleanIncome)} |`)
+    ln(`| Расходы | ${fmtEur(totalPaid)} |`)
+    ln(`| Неудачные платежи | ${fmtEur(totalDebt)} |`)
+    ln(`| Штрафы | ${fmtEur(strafen)} |`)
+    ln(``)
+    ln(`---`)
+    ln(``)
+    ln(`## Транзакции (${filtered.length})`)
+    ln(``)
+    ln(`| Дата | Сумма | Источник | Тип | Описание |`)
+    ln(`|---|---|---|---|---|`)
+    const sorted = filtered.slice().sort((a, b) => b.date.localeCompare(a.date))
+    for (const t of sorted) {
+      const typeLbl = typeLabels[t.type]
+      const desc = esc(t.description ?? '—')
+      const amtStr = t.type === 'income' ? `+${fmtEur(t.amount)}` : `-${fmtEur(t.amount)}`
+      ln(`| ${t.date} | ${amtStr} | ${esc(t.source)} | ${typeLbl} | ${desc} |`)
+    }
+    ln(``)
+
+    const filename = `Транзакции_${range.from}_${range.to}.md`
+    await window.api.exportMd(lines.join('\n'), filename)
+  }, [filtered, range, cleanIncome, totalPaid, totalDebt, strafen])
+
+  const handleExportPDF = useCallback(async () => {
+    const fmtEur = (n: number) => n.toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })
+    const periodLabel = `${range.from} — ${range.to}`
+    const sorted = filtered.slice().sort((a, b) => b.date.localeCompare(a.date))
+    const typeColors: Record<string, string> = {
+      income: '#16a34a',
+      payment: '#dc2626',
+      failed_debit: '#dc2626',
+      penalty: '#d97706',
+    }
+    const rows = sorted.map((t) => {
+      const color = typeColors[t.type] ?? '#333'
+      const sign = t.type === 'income' ? '+' : '−'
+      return `<tr>
+        <td style="padding:6px 10px;border-bottom:1px solid #eee">${t.date}</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #eee;font-weight:600;color:${color}">${sign}${fmtEur(t.amount)}</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #eee">${t.source}</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #eee;color:${color}">${typeLabels[t.type]}</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #eee;color:#666">${t.description ?? '—'}</td>
+      </tr>`
+    }).join('')
+    const html = `<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <title>Транзакции — ${periodLabel}</title>
+  <style>
+    body { font-family: -apple-system, 'Segoe UI', Roboto, sans-serif; background: #fff; color: #111; padding: 32px; max-width: 1000px; margin: 0 auto; }
+    h1 { font-size: 22px; margin-bottom: 4px; }
+    .meta { color: #666; font-size: 13px; margin-bottom: 24px; }
+    .stats { display: flex; gap: 16px; margin-bottom: 24px; flex-wrap: wrap; }
+    .stat { flex: 1; min-width: 140px; background: #f5f5f5; border: 1px solid #ddd; border-radius: 12px; padding: 14px; }
+    .stat-label { font-size: 11px; color: #666; text-transform: uppercase; }
+    .stat-value { font-size: 20px; font-weight: 700; margin-top: 4px; }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    th { text-align: left; color: #666; border-bottom: 2px solid #bbb; padding: 8px 10px; }
+  </style>
+</head>
+<body>
+  <h1>Транзакции — ${periodLabel}</h1>
+  <p class="meta">Сгенерировано: ${new Date().toLocaleString('ru-RU')}</p>
+  <div class="stats">
+    <div class="stat"><div class="stat-label">Доходы</div><div class="stat-value" style="color:#16a34a">${fmtEur(cleanIncome)}</div></div>
+    <div class="stat"><div class="stat-label">Расходы</div><div class="stat-value" style="color:#dc2626">${fmtEur(totalPaid)}</div></div>
+    <div class="stat"><div class="stat-label">Неудачные</div><div class="stat-value" style="color:#dc2626">${fmtEur(totalDebt)}</div></div>
+    <div class="stat"><div class="stat-label">Штрафы</div><div class="stat-value" style="color:#d97706">${fmtEur(strafen)}</div></div>
+    <div class="stat"><div class="stat-label">Всего</div><div class="stat-value">${filtered.length}</div></div>
+  </div>
+  <table>
+    <thead><tr>
+      <th>Дата</th><th>Сумма</th><th>Источник</th><th>Тип</th><th>Описание</th>
+    </tr></thead>
+    <tbody>${rows}</tbody>
+  </table>
+</body>
+</html>`
+    const filename = `Транзакции_${range.from}_${range.to}.pdf`
+    await window.api.exportPdf(html, filename)
+  }, [filtered, range, cleanIncome, totalPaid, totalDebt, strafen])
 
   const searchResults = useMemo(() => {
     if (searchQuery.trim().length < 2) return []
@@ -1260,8 +1364,28 @@ export function Dashboard({
 
       {/* All transactions table */}
       <div className="rounded-xl border border-neutral-800 bg-neutral-900/50">
-        <div className="flex items-center justify-end border-b border-neutral-800/60 px-4 py-2">
+        <div className="flex items-center justify-between border-b border-neutral-800/60 px-4 py-2">
           <h3 className="text-xs font-medium text-neutral-500">Все транзакции</h3>
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => { void handleExportMD() }}
+              className="flex items-center gap-1 rounded px-2 py-1 text-xs text-neutral-500 hover:bg-neutral-800 hover:text-neutral-300 transition-colors"
+              title="Скачать MD"
+            >
+              <Download className="h-3.5 w-3.5" />
+              MD
+            </button>
+            <button
+              type="button"
+              onClick={() => { void handleExportPDF() }}
+              className="flex items-center gap-1 rounded px-2 py-1 text-xs text-neutral-500 hover:bg-neutral-800 hover:text-neutral-300 transition-colors"
+              title="Скачать PDF"
+            >
+              <Download className="h-3.5 w-3.5" />
+              PDF
+            </button>
+          </div>
         </div>
         <table className="w-full text-sm">
           <thead>

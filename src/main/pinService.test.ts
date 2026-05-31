@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect } from 'vitest'
 import { hashPin, verifyPin, type PinSettings } from './pinService'
 
 function makePin(overrides: Partial<PinSettings> = {}): PinSettings {
