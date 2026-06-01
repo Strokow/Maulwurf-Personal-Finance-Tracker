@@ -593,6 +593,16 @@ export function Dashboard({
     const fmtEur = (n: number) => n.toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })
     const esc = (s: string) => s.replace(/\|/g, '\\|').replace(/\n/g, ' ')
     const periodLabel = `${range.from} — ${range.to}`
+
+    // Export all transactions for the period, ignoring any active source filter
+    const allPeriod = transactions.filter(t => t.date >= range.from && t.date <= range.to)
+    const allSorted = allPeriod.slice().sort((a, b) => b.date.localeCompare(a.date))
+
+    const allIncome = allPeriod.filter(t => t.type === 'income' && !isReturnOrRefund(t)).reduce((s, t) => s + t.amount, 0)
+    const allPayments = allPeriod.filter(t => t.type === 'payment').reduce((s, t) => s + t.amount, 0)
+    const allFailed = allPeriod.filter(t => t.type === 'failed_debit').reduce((s, t) => s + t.amount, 0)
+    const allPenalty = allPeriod.filter(t => t.type === 'penalty').reduce((s, t) => s + t.amount, 0)
+
     const lines: string[] = []
     const ln = (...args: string[]) => lines.push(...args)
 
@@ -607,20 +617,19 @@ export function Dashboard({
     ln(`| Показатель | Значение |`)
     ln(`|---|---|`)
     ln(`| Период | ${periodLabel} |`)
-    ln(`| Всего транзакций | ${filtered.length} |`)
-    ln(`| Доходы | ${fmtEur(cleanIncome)} |`)
-    ln(`| Расходы | ${fmtEur(totalPaid)} |`)
-    ln(`| Неудачные платежи | ${fmtEur(totalDebt)} |`)
-    ln(`| Штрафы | ${fmtEur(strafen)} |`)
+    ln(`| Всего транзакций | ${allPeriod.length} |`)
+    ln(`| Доходы | ${fmtEur(allIncome)} |`)
+    ln(`| Расходы | ${fmtEur(allPayments)} |`)
+    ln(`| Неудачные платежи | ${fmtEur(allFailed)} |`)
+    ln(`| Штрафы | ${fmtEur(allPenalty)} |`)
     ln(``)
     ln(`---`)
     ln(``)
-    ln(`## Транзакции (${filtered.length})`)
+    ln(`## Транзакции (${allPeriod.length})`)
     ln(``)
     ln(`| Дата | Сумма | Источник | Тип | Описание |`)
     ln(`|---|---|---|---|---|`)
-    const sorted = filtered.slice().sort((a, b) => b.date.localeCompare(a.date))
-    for (const t of sorted) {
+    for (const t of allSorted) {
       const typeLbl = typeLabels[t.type]
       const desc = esc(t.description ?? '—')
       const amtStr = t.type === 'income' ? `+${fmtEur(t.amount)}` : `-${fmtEur(t.amount)}`
@@ -630,19 +639,28 @@ export function Dashboard({
 
     const filename = `Транзакции_${range.from}_${range.to}.md`
     await window.api.exportMd(lines.join('\n'), filename)
-  }, [filtered, range, cleanIncome, totalPaid, totalDebt, strafen])
+  }, [transactions, range])
 
   const handleExportPDF = useCallback(async () => {
     const fmtEur = (n: number) => n.toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })
     const periodLabel = `${range.from} — ${range.to}`
-    const sorted = filtered.slice().sort((a, b) => b.date.localeCompare(a.date))
+
+    // Export all transactions for the period, ignoring any active source filter
+    const allPeriod = transactions.filter(t => t.date >= range.from && t.date <= range.to)
+    const allSorted = allPeriod.slice().sort((a, b) => b.date.localeCompare(a.date))
+
+    const allIncome = allPeriod.filter(t => t.type === 'income' && !isReturnOrRefund(t)).reduce((s, t) => s + t.amount, 0)
+    const allPayments = allPeriod.filter(t => t.type === 'payment').reduce((s, t) => s + t.amount, 0)
+    const allFailed = allPeriod.filter(t => t.type === 'failed_debit').reduce((s, t) => s + t.amount, 0)
+    const allPenalty = allPeriod.filter(t => t.type === 'penalty').reduce((s, t) => s + t.amount, 0)
+
     const typeColors: Record<string, string> = {
       income: '#16a34a',
       payment: '#dc2626',
       failed_debit: '#dc2626',
       penalty: '#d97706',
     }
-    const rows = sorted.map((t) => {
+    const rows = allSorted.map((t) => {
       const color = typeColors[t.type] ?? '#333'
       const sign = t.type === 'income' ? '+' : '−'
       return `<tr>
@@ -674,11 +692,11 @@ export function Dashboard({
   <h1>Транзакции — ${periodLabel}</h1>
   <p class="meta">Сгенерировано: ${new Date().toLocaleString('ru-RU')}</p>
   <div class="stats">
-    <div class="stat"><div class="stat-label">Доходы</div><div class="stat-value" style="color:#16a34a">${fmtEur(cleanIncome)}</div></div>
-    <div class="stat"><div class="stat-label">Расходы</div><div class="stat-value" style="color:#dc2626">${fmtEur(totalPaid)}</div></div>
-    <div class="stat"><div class="stat-label">Неудачные</div><div class="stat-value" style="color:#dc2626">${fmtEur(totalDebt)}</div></div>
-    <div class="stat"><div class="stat-label">Штрафы</div><div class="stat-value" style="color:#d97706">${fmtEur(strafen)}</div></div>
-    <div class="stat"><div class="stat-label">Всего</div><div class="stat-value">${filtered.length}</div></div>
+    <div class="stat"><div class="stat-label">Доходы</div><div class="stat-value" style="color:#16a34a">${fmtEur(allIncome)}</div></div>
+    <div class="stat"><div class="stat-label">Расходы</div><div class="stat-value" style="color:#dc2626">${fmtEur(allPayments)}</div></div>
+    <div class="stat"><div class="stat-label">Неудачные</div><div class="stat-value" style="color:#dc2626">${fmtEur(allFailed)}</div></div>
+    <div class="stat"><div class="stat-label">Штрафы</div><div class="stat-value" style="color:#d97706">${fmtEur(allPenalty)}</div></div>
+    <div class="stat"><div class="stat-label">Всего</div><div class="stat-value">${allPeriod.length}</div></div>
   </div>
   <table>
     <thead><tr>
@@ -690,7 +708,7 @@ export function Dashboard({
 </html>`
     const filename = `Транзакции_${range.from}_${range.to}.pdf`
     await window.api.exportPdf(html, filename)
-  }, [filtered, range, cleanIncome, totalPaid, totalDebt, strafen])
+  }, [transactions, range])
 
   const searchResults = useMemo(() => {
     if (searchQuery.trim().length < 2) return []

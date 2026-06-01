@@ -414,8 +414,8 @@ export function ObligationsTab({
     // BUG-014: completed Klarna (paid >= totalInstallments) исключены из счётчика —
     // их paid-метка за текущий месяц это часть импорт-истории, не реальный платёж пользователя.
     if (isKlarnaCompleted(o)) return false
-    // Yearly obligations covered by an earlier month's payment count as paid
-    if (o.frequency === 'yearly' && isYearlyCovered(o)) return true
+    // Only count obligations with an actual 'paid' record for THIS month.
+    // Yearly covered by a past month's payment are NOT counted here.
     const rec = getMonthRecord(o.id, year, month)
     return rec?.status === 'paid'
   }).length
@@ -1207,206 +1207,111 @@ export function ObligationsTab({
 
   const handleExportMD = useCallback(async () => {
     const fmtEur = (n: number): string => n.toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })
-    const esc = (s: string): string => s.replace(/\|/g, '\\|').replace(/\n/g, ' ')
     const statusLabel = (s: ObligationStatus): string =>
-      ({ paid: '✅ Оплачено', unpaid: '❌ Не оплачено', unknown: '❓ Неизвестно', skipped: '⏭ Пропущено' }[s] ?? '❓ Неизвестно')
-    const monthLbl = (y: number, m: number): string =>
-      new Date(y, m - 1, 1).toLocaleDateString('ru-RU', { month: 'long', year: 'numeric' })
-    const MONTHS_RU = ['январь','февраль','март','апрель','май','июнь','июль','август','сентябрь','октябрь','ноябрь','декабрь']
+      ({ paid: 'Оплачено', unpaid: 'Не оплачено', unknown: 'Неизвестно', skipped: 'Пропущено' }[s] ?? 'Неизвестно')
+    const freqLabel = (f?: ObligationFrequency): string =>
+      f === 'yearly' ? 'Ежегодный' : f === 'once' ? 'Единоразовый' : 'Ежемесячный'
 
-    const lines: string[] = []
-    const ln = (...args: string[]) => lines.push(...args)
+    // Export uses ALL active obligations, ignoring current filter/search state
+    const allSorted = [...active].sort((a, b) => a.name.localeCompare(b.name))
 
-    ln(`# Обязательства — ${currentMonthLabel}`)
-    ln(``)
-    ln(`> Сгенерировано: ${new Date().toLocaleString('ru-RU')}`)
-    ln(``)
-    ln(`---`)
-    ln(``)
-    ln(`## Сводка`)
-    ln(``)
-    ln(`| Показатель | Значение |`)
-    ln(`|---|---|`)
-    ln(`| Итого к оплате | ${fmtEur(totalMonthlyFiltered)} |`)
-    ln(`| Оплачено | ${fmtEur(totalPaidFiltered)} (${paidCount} позиций) |`)
-    ln(`| Ожидают оплаты | ${pendingCount} |`)
-    ln(``)
-
-    // --- Regular monthly subscriptions ---
-    if (regularMonthly.length > 0) {
-      ln(`---`)
-      ln(``)
-      ln(`## Ежемесячные подписки (${regularMonthly.length})`)
-      ln(``)
-      ln(`| Название | Сумма | ~День | Статус | Заметки |`)
-      ln(`|---|---|---|---|---|`)
-      for (const o of regularMonthly) {
+    const renderGroupMd = (title: string, items: Obligation[]): string => {
+      if (items.length === 0) return ''
+      const rows = items.map(o => {
         const rec = getMonthRecord(o.id, year, month)
-        const st = (rec?.status ?? 'unpaid') as ObligationStatus
+        const st = isYearlyCovered(o)
+          ? 'paid'
+          : (rec?.status ?? ((!o.frequency || o.frequency === 'monthly') ? 'unpaid' : 'unknown')) as ObligationStatus
         const amt = o.amount !== null ? fmtEur(o.amount) : '—'
-        const day = o.approximateDay !== null ? `${o.approximateDay}` : '—'
-        const notes = esc(o.notes ?? '')
-        ln(`| ${esc(o.name)} | ${amt} | ${day} | ${statusLabel(st)} | ${notes} |`)
-      }
-      ln(``)
+        const dayStr = o.approximateDay !== null ? `~${o.approximateDay}` : ''
+        const notes = (o.notes ?? '').replace(/\|/g, '\\|').replace(/\n/g, ' ')
+        const name = o.name.replace(/\|/g, '\\|')
+        return `| ${name} | ${freqLabel(o.frequency)} | ${amt} | ${dayStr} | ${statusLabel(st)} | ${notes} |`
+      }).join('\n')
+      return `\n## ${title} (${items.length})\n\n| Название | Период | Сумма | Дата | Статус | Заметки |\n|---|---|---|---|---|---|\n${rows}\n`
     }
 
-    // --- Klarna installments ---
-    if (klarnaMonthly.length > 0) {
-      ln(`---`)
-      ln(``)
-      ln(`## Klarna — Рассрочки (${klarnaMonthly.length})`)
-      ln(``)
-      for (const o of klarnaMonthly) {
-        const rec = getMonthRecord(o.id, year, month)
-        const paidInst = klarnaPaidCountMap.get(o.id) ?? 0
-        const totalInst = o.totalInstallments ?? null
-        const monthlyAmt = o.amount ?? 0
-        const paidAmt = paidInst * monthlyAmt
-        const completed = isKlarnaCompleted(o)
-        const stRaw: ObligationStatus = completed ? 'paid' : ((rec?.status ?? 'unpaid') as ObligationStatus)
+    const monthlyAll = allSorted.filter(o => (o.frequency ?? 'monthly') === 'monthly' && !o.sectionId && !o.parentId)
+    const yearlyAll = allSorted.filter(o => o.frequency === 'yearly' && !o.sectionId && !o.parentId)
+    const onceAll = allSorted.filter(o => o.frequency === 'once' && !o.sectionId && !o.parentId)
+    const allCustomMd = customSections
+      .map(s => renderGroupMd(s.name, allSorted.filter(o => o.sectionId === s.id)))
+      .join('')
 
-        ln(`### ${esc(o.name)}`)
-        ln(``)
-        ln(`| Параметр | Значение |`)
-        ln(`|---|---|`)
-        ln(`| Ежемесячный платёж | ${monthlyAmt > 0 ? fmtEur(monthlyAmt) : '—'} |`)
-        if (totalInst != null) {
-          const remainInst = Math.max(0, totalInst - paidInst)
-          const remainAmt = remainInst * monthlyAmt
-          ln(`| Прогресс | ${paidInst} / ${totalInst} платежей |`)
-          ln(`| Оплачено суммарно | ${fmtEur(paidAmt)} |`)
-          ln(`| Остаток долга | ${fmtEur(remainAmt)} |`)
-          if (o.originalTotal != null) {
-            ln(`| Изначальный долг | ${fmtEur(o.originalTotal)} |`)
-          }
-        } else {
-          ln(`| Оплачено платежей | ${paidInst} |`)
-        }
-        ln(`| Статус в ${currentMonthLabel} | ${statusLabel(stRaw)} |`)
-        if (o.approximateDay !== null) {
-          ln(`| ~День платежа | ${o.approximateDay} число |`)
-        }
-        if (o.notes) ln(`| Заметки | ${esc(o.notes)} |`)
-        ln(``)
+    // Compute totals from all active (not filtered by UI search/status/type)
+    const totalPayable = allSorted.reduce((sum, o) => {
+      if (carryDestMap.has(o.id)) return sum
+      const rec = getMonthRecord(o.id, year, month)
+      if (o.frequency === 'yearly') {
+        if (isYearlyCovered(o)) return sum
+        if (o.yearlyMonth != null && o.yearlyMonth !== month) return sum
       }
-    }
-
-    // --- Yearly ---
-    if (yearlyObligations.length > 0) {
-      ln(`---`)
-      ln(``)
-      ln(`## Ежегодные (${yearlyObligations.length})`)
-      ln(``)
-      ln(`| Название | Сумма/год | Месяц платежа | Статус | Покрыто до | Заметки |`)
-      ln(`|---|---|---|---|---|---|`)
-      for (const o of yearlyObligations) {
-        const isYC = isYearlyCovered(o)
-        const rec = getMonthRecord(o.id, year, month)
-        const st: ObligationStatus = isYC ? 'paid' : ((rec?.status ?? 'unknown') as ObligationStatus)
-        const amt = o.amount !== null ? fmtEur(o.amount) : '—'
-        const payMonth = o.yearlyMonth != null ? MONTHS_RU[o.yearlyMonth - 1] : '—'
-        const paidUntil = yearlyPaidUntilMap.get(o.id)
-        const untilStr = paidUntil ? monthLbl(paidUntil.untilYear, paidUntil.untilMonth) : '—'
-        const notes = esc(o.notes ?? '')
-        ln(`| ${esc(o.name)} | ${amt} | ${payMonth} | ${statusLabel(st)} | ${untilStr} | ${notes} |`)
+      const base = o.amount ?? 0
+      if (rec?.isCarriedOver) {
+        const cp = rec.carriedPaid ? 0 : (rec.carriedAmount ?? 0)
+        const cur = rec.status === 'paid' ? 0 : base
+        const total = cp + cur
+        return total > 0 ? sum + total : sum
       }
-      ln(``)
-    }
+      if (rec?.status === 'paid') return sum
+      if (rec && rec.status === 'unknown') return sum
+      const isMonthlyObl = !o.frequency || o.frequency === 'monthly'
+      if (!rec && !isMonthlyObl) return sum
+      return sum + base
+    }, 0)
 
-    // --- Once ---
-    if (onceObligations.length > 0) {
-      ln(`---`)
-      ln(``)
-      ln(`## Единоразовые (${onceObligations.length})`)
-      ln(``)
-      ln(`| Название | Сумма | Статус | Заметки |`)
-      ln(`|---|---|---|---|`)
-      for (const o of onceObligations) {
-        const rec = getMonthRecord(o.id, year, month)
-        const st = (rec?.status ?? 'unknown') as ObligationStatus
-        const amt = o.amount !== null ? fmtEur(o.amount) : '—'
-        const notes = esc(o.notes ?? '')
-        ln(`| ${esc(o.name)} | ${amt} | ${statusLabel(st)} | ${notes} |`)
+    const totalPaidAmt = allSorted.reduce((sum, o) => {
+      const rec = getMonthRecord(o.id, year, month)
+      const base = o.amount ?? 0
+      if (rec?.isCarriedOver) {
+        return sum + (rec.carriedPaid ? (rec.carriedAmount ?? 0) : 0) + (rec.status === 'paid' ? base : 0)
       }
-      ln(``)
-    }
+      return rec?.status === 'paid' ? sum + base : sum
+    }, 0)
 
-    // --- Custom sections ---
-    for (const s of customSections) {
-      const items = sorted.filter(o => o.sectionId === s.id)
-      if (items.length === 0) continue
-      ln(`---`)
-      ln(``)
-      ln(`## ${esc(s.name)} (${items.length})`)
-      ln(``)
-      ln(`| Название | Сумма | ~День | Статус | Заметки |`)
-      ln(`|---|---|---|---|---|`)
-      for (const o of items) {
-        const rec = getMonthRecord(o.id, year, month)
-        const st = (rec?.status ?? ((!o.frequency || o.frequency === 'monthly') ? 'unpaid' : 'unknown')) as ObligationStatus
-        const amt = o.amount !== null ? fmtEur(o.amount) : '—'
-        const day = o.approximateDay !== null ? `${o.approximateDay}` : '—'
-        const notes = esc(o.notes ?? '')
-        ln(`| ${esc(o.name)} | ${amt} | ${day} | ${statusLabel(st)} | ${notes} |`)
+    const paidCountAll = allSorted.filter(o => {
+      if (isKlarnaCompleted(o)) return false
+      const rec = getMonthRecord(o.id, year, month)
+      return rec?.status === 'paid'
+    }).length
+
+    const pendingCountAll = allSorted.filter(o => {
+      if (carryDestMap.has(o.id)) return false
+      if (o.frequency === 'yearly') {
+        if (isYearlyCovered(o)) return false
+        if (o.yearlyMonth != null && o.yearlyMonth !== month) return false
       }
-      ln(``)
-    }
+      const rec = getMonthRecord(o.id, year, month)
+      if (rec?.status === 'paid') return false
+      if (rec && rec.status === 'unknown') return false
+      const isMonthlyObl = !o.frequency || o.frequency === 'monthly'
+      if (!rec && !isMonthlyObl) return false
+      return true
+    }).length
 
-    // --- Carry-out: debts moved FROM this month ---
-    const carriedOutItems = sorted.filter(o => carryDestMap.has(o.id))
-    // --- Carry-in: debts moved TO this month from past months ---
-    const carriedInRecords = obligationMonths.filter(
-      m => m.isCarriedOver && m.year === year && m.month === month
-    )
+    const md = [
+      `# Обязательства — ${currentMonthLabel}`,
+      ``,
+      `Сгенерировано: ${new Date().toLocaleString('ru-RU')}`,
+      ``,
+      `## Итого`,
+      ``,
+      `| Показатель | Значение |`,
+      `|---|---|`,
+      `| Итого к оплате | ${fmtEur(totalPayable)} |`,
+      `| Оплачено | ${fmtEur(totalPaidAmt)} (${paidCountAll} поз.) |`,
+      `| Ожидают оплаты | ${pendingCountAll} |`,
+      renderGroupMd('Ежемесячные', monthlyAll),
+      renderGroupMd('Ежегодные', yearlyAll),
+      renderGroupMd('Единоразовые', onceAll),
+      allCustomMd,
+    ].join('\n')
 
-    if (carriedOutItems.length > 0 || carriedInRecords.length > 0) {
-      ln(`---`)
-      ln(``)
-      ln(`## Перенесённые обязательства`)
-      ln(``)
-
-      if (carriedOutItems.length > 0) {
-        ln(`### Долги перенесены ИЗ этого месяца (${carriedOutItems.length})`)
-        ln(``)
-        ln(`| Обязательство | Сумма | Перенесено в |`)
-        ln(`|---|---|---|`)
-        for (const o of carriedOutItems) {
-          const dest = carryDestMap.get(o.id)!
-          const amt = o.amount !== null ? fmtEur(o.amount) : '—'
-          ln(`| ${esc(o.name)} | ${amt} | ${monthLbl(dest.toYear, dest.toMonth)} |`)
-        }
-        ln(``)
-      }
-
-      if (carriedInRecords.length > 0) {
-        ln(`### Долги перенесены В этот месяц (${carriedInRecords.length})`)
-        ln(``)
-        ln(`| Обязательство | Перенесено из | Сумма долга | Долг оплачен | Статус месяца |`)
-        ln(`|---|---|---|---|---|`)
-        for (const rec of carriedInRecords) {
-          const o = obligations.find(ob => ob.id === rec.obligationId)
-          const name = o ? esc(o.name) : rec.obligationId
-          const fromStr = (rec.carriedFromYear != null && rec.carriedFromMonth != null)
-            ? monthLbl(rec.carriedFromYear, rec.carriedFromMonth) : '—'
-          const debtAmt = rec.carriedAmount != null ? fmtEur(rec.carriedAmount) : '—'
-          const debtPaid = rec.carriedPaid ? '✅ Да' : '❌ Нет'
-          const mainRec = getMonthRecord(rec.obligationId, year, month)
-          const mainSt = (mainRec?.status ?? 'unpaid') as ObligationStatus
-          ln(`| ${name} | ${fromStr} | ${debtAmt} | ${debtPaid} | ${statusLabel(mainSt)} |`)
-        }
-        ln(``)
-      }
-    }
-
-    await window.api.exportMd(lines.join('\n'), `Обязательства_${year}_${String(month).padStart(2, '0')}.md`)
+    await window.api.exportMd(md, `Обязательства_${year}_${String(month).padStart(2, '0')}.md`)
   }, [
-    sorted, regularMonthly, klarnaMonthly, monthlyObligations, yearlyObligations, onceObligations,
-    customSections, obligations, obligationMonths,
+    active, customSections,
     getMonthRecord, year, month, currentMonthLabel,
-    totalMonthlyFiltered, totalPaidFiltered, paidCount, pendingCount,
-    carryDestMap, yearlyPaidUntilMap, isYearlyCovered,
-    klarnaPaidCountMap, isKlarnaCompleted,
+    carryDestMap, isYearlyCovered, isKlarnaCompleted,
   ])
 
   const handleExportPDF = useCallback(async () => {
@@ -1424,23 +1329,22 @@ export function ObligationsTab({
     const freqLabel = (f?: ObligationFrequency): string =>
       f === 'yearly' ? 'Ежегодный' : f === 'once' ? 'Единоразовый' : 'Ежемесячный'
 
+    // Export uses ALL active obligations, ignoring current filter/search state
+    const allSorted = [...active].sort((a, b) => a.name.localeCompare(b.name))
+
     const renderGroup = (title: string, items: Obligation[]): string => {
       if (items.length === 0) return ''
       const rows = items.map(o => {
         const rec = getMonthRecord(o.id, year, month)
-        const carry = carryoverMap.get(o.id)
-        const isYC = o.frequency === 'yearly' && yearlyPaidUntilMap.has(o.id)
-        const st = isYC
+        const st = isYearlyCovered(o)
           ? 'paid'
           : (rec?.status ?? ((!o.frequency || o.frequency === 'monthly') ? 'unpaid' : 'unknown')) as ObligationStatus
         const amt = o.amount !== null ? fmtEur(o.amount) : '—'
-        const carryColor = carry?.resolved ? '#4ade80' : '#d97706'
-        const carryStr = carry ? ` <span style="color:${carryColor}">+ долг ${fmtEur(carry.totalDebt)} (${carry.months} мес.)</span>` : ''
         const dayStr = o.approximateDay !== null ? `~${o.approximateDay} число` : ''
         return `<tr>
           <td style="padding:8px 12px;border-bottom:1px solid #ddd">${o.name}</td>
           <td style="padding:8px 12px;border-bottom:1px solid #ddd">${freqLabel(o.frequency)}</td>
-          <td style="padding:8px 12px;border-bottom:1px solid #ddd">${amt}${carryStr}</td>
+          <td style="padding:8px 12px;border-bottom:1px solid #ddd">${amt}</td>
           <td style="padding:8px 12px;border-bottom:1px solid #ddd">${dayStr}</td>
           <td style="padding:8px 12px;border-bottom:1px solid #ddd">${statusBadge(st)}</td>
           <td style="padding:8px 12px;border-bottom:1px solid #ddd;color:#666">${o.notes ?? ''}</td>
@@ -1460,10 +1364,61 @@ export function ObligationsTab({
         </table>`
     }
 
-    const allCustom = customSections.map(s => {
-      const obs = sorted.filter(o => o.sectionId === s.id)
-      return renderGroup(s.name, obs)
-    }).join('')
+    const monthlyAll = allSorted.filter(o => (o.frequency ?? 'monthly') === 'monthly' && !o.sectionId && !o.parentId)
+    const yearlyAll = allSorted.filter(o => o.frequency === 'yearly' && !o.sectionId && !o.parentId)
+    const onceAll = allSorted.filter(o => o.frequency === 'once' && !o.sectionId && !o.parentId)
+    const allCustom = customSections.map(s => renderGroup(s.name, allSorted.filter(o => o.sectionId === s.id))).join('')
+
+    // Compute totals from all active (not filtered by UI search/status/type)
+    const totalPayable = allSorted.reduce((sum, o) => {
+      if (carryDestMap.has(o.id)) return sum
+      const rec = getMonthRecord(o.id, year, month)
+      if (o.frequency === 'yearly') {
+        if (isYearlyCovered(o)) return sum
+        if (o.yearlyMonth != null && o.yearlyMonth !== month) return sum
+      }
+      const base = o.amount ?? 0
+      if (rec?.isCarriedOver) {
+        const cp = rec.carriedPaid ? 0 : (rec.carriedAmount ?? 0)
+        const cur = rec.status === 'paid' ? 0 : base
+        const total = cp + cur
+        return total > 0 ? sum + total : sum
+      }
+      if (rec?.status === 'paid') return sum
+      if (rec && rec.status === 'unknown') return sum
+      const isMonthlyObl = !o.frequency || o.frequency === 'monthly'
+      if (!rec && !isMonthlyObl) return sum
+      return sum + base
+    }, 0)
+
+    const totalPaidAmt = allSorted.reduce((sum, o) => {
+      const rec = getMonthRecord(o.id, year, month)
+      const base = o.amount ?? 0
+      if (rec?.isCarriedOver) {
+        return sum + (rec.carriedPaid ? (rec.carriedAmount ?? 0) : 0) + (rec.status === 'paid' ? base : 0)
+      }
+      return rec?.status === 'paid' ? sum + base : sum
+    }, 0)
+
+    const paidCountAll = allSorted.filter(o => {
+      if (isKlarnaCompleted(o)) return false
+      const rec = getMonthRecord(o.id, year, month)
+      return rec?.status === 'paid'
+    }).length
+
+    const pendingCountAll = allSorted.filter(o => {
+      if (carryDestMap.has(o.id)) return false
+      if (o.frequency === 'yearly') {
+        if (isYearlyCovered(o)) return false
+        if (o.yearlyMonth != null && o.yearlyMonth !== month) return false
+      }
+      const rec = getMonthRecord(o.id, year, month)
+      if (rec?.status === 'paid') return false
+      if (rec && rec.status === 'unknown') return false
+      const isMonthlyObl = !o.frequency || o.frequency === 'monthly'
+      if (!rec && !isMonthlyObl) return false
+      return true
+    }).length
 
     const html = `<!DOCTYPE html>
 <html lang="ru">
@@ -1488,28 +1443,27 @@ export function ObligationsTab({
   <div class="stats">
     <div class="stat">
       <div class="stat-label">Итого к оплате</div>
-      <div class="stat-value">${fmtEur(totalMonthlyFiltered)}</div>
-      ${carryoverFiltered.total > 0 ? `<div style="font-size:12px;color:#d97706;margin-top:4px">вкл. долг: ${fmtEur(carryoverFiltered.total)}</div>` : ''}
+      <div class="stat-value">${fmtEur(totalPayable)}</div>
     </div>
     <div class="stat">
       <div class="stat-label">Оплачено</div>
-      <div class="stat-value" style="color:#16a34a">${fmtEur(totalPaidFiltered)}</div>
-      <div style="font-size:12px;color:#666;margin-top:4px">${paidCount} ${paidCount === 1 ? 'позиция' : 'позиций'}</div>
+      <div class="stat-value" style="color:#16a34a">${fmtEur(totalPaidAmt)}</div>
+      <div style="font-size:12px;color:#666;margin-top:4px">${paidCountAll} ${paidCountAll === 1 ? 'позиция' : 'позиций'}</div>
     </div>
     <div class="stat">
       <div class="stat-label">Ожидают оплаты</div>
-      <div class="stat-value" style="color:${pendingCount > 0 ? '#dc2626' : '#16a34a'}">${pendingCount}</div>
+      <div class="stat-value" style="color:${pendingCountAll > 0 ? '#dc2626' : '#16a34a'}">${pendingCountAll}</div>
     </div>
   </div>
-  ${renderGroup('Ежемесячные', monthlyObligations)}
-  ${renderGroup('Ежегодные', yearlyObligations)}
-  ${renderGroup('Единоразовые', onceObligations)}
+  ${renderGroup('Ежемесячные', monthlyAll)}
+  ${renderGroup('Ежегодные', yearlyAll)}
+  ${renderGroup('Единоразовые', onceAll)}
   ${allCustom}
 </body>
 </html>`
 
     await window.api.exportPdf(html, `Обязательства_${year}_${String(month).padStart(2, '0')}.pdf`)
-  }, [filtered, sorted, monthlyObligations, yearlyObligations, onceObligations, customSections, getMonthRecord, year, month, currentMonthLabel, totalMonthlyFiltered, totalPaidFiltered, paidCount, pendingCount, carryoverMap, carryoverFiltered, yearlyPaidUntilMap])
+  }, [active, customSections, getMonthRecord, year, month, currentMonthLabel, carryDestMap, isYearlyCovered, isKlarnaCompleted])
 
   return (
     <div className="space-y-6">
