@@ -511,19 +511,25 @@ export function Dashboard({
       const label = d.toLocaleDateString('ru-RU', { month: 'short' })
       const monthTx = sourceTx.filter((t) => t.date.startsWith(monthStr))
       const incomeTx = monthTx.filter((t) => t.type === 'income')
+      // round2: убирает накопленную ошибку float (94.6999… → 94.70)
+      const round2 = (n: number): number => Math.round(n * 100) / 100
       months.push({
         name: label,
-        Sparkasse: incomeTx
-          .filter((t) => t.source === 'Sparkasse')
-          .reduce((s, t) => s + t.amount, 0),
-        Revolut: incomeTx.filter((t) => t.source === 'Revolut').reduce((s, t) => s + t.amount, 0),
-        PayPal: incomeTx
-          .filter((t) => t.source === 'PayPal')
-          .reduce((s, t) => s + t.amount, 0),
-        Пятак: incomeTx
-          .filter((t) => t.source === 'Пятак')
-          .reduce((s, t) => s + t.amount, 0),
-        Штрафы: monthTx.filter((t) => t.type === 'penalty').reduce((s, t) => s + t.amount, 0)
+        Sparkasse: round2(
+          incomeTx.filter((t) => t.source === 'Sparkasse').reduce((s, t) => s + t.amount, 0)
+        ),
+        Revolut: round2(
+          incomeTx.filter((t) => t.source === 'Revolut').reduce((s, t) => s + t.amount, 0)
+        ),
+        PayPal: round2(
+          incomeTx.filter((t) => t.source === 'PayPal').reduce((s, t) => s + t.amount, 0)
+        ),
+        Пятак: round2(
+          incomeTx.filter((t) => t.source === 'Пятак').reduce((s, t) => s + t.amount, 0)
+        ),
+        Штрафы: round2(
+          monthTx.filter((t) => t.type === 'penalty').reduce((s, t) => s + t.amount, 0)
+        )
       })
     }
     return months

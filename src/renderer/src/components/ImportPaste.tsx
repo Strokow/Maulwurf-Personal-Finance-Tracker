@@ -3,6 +3,7 @@ import { motion } from 'framer-motion'
 import { Loader2, ChevronDown, ChevronUp, Trash2, Settings2 } from 'lucide-react'
 import type { Transaction, ImportRecord } from '../types'
 import { parseImportText } from '../utils/parseImport'
+import { parseRawStatement } from '../utils/parseRawStatement'
 import { getTransactionGroups } from '../store/useStore'
 import { detectBankFormat, bankLabels, bankColors, type BankFormat } from '../utils/bankDetector'
 import { Button } from './ui/button'
@@ -236,7 +237,11 @@ export function ImportPaste({ onImport, onAddImportRecord, onDeleteBatch, import
   }
 
   const handleParse = (): void => {
-    const parsed = parseImportText(text)
+    // Try the pipe-delimited format first; if it's a raw statement, parse it deterministically.
+    let parsed = parseImportText(text)
+    if (parsed.length === 0) {
+      parsed = parseRawStatement(text, detectBankFormat(text))
+    }
     setPreview(parsed)
     setImported(false)
   }
@@ -258,6 +263,14 @@ export function ImportPaste({ onImport, onAddImportRecord, onDeleteBatch, import
         setAiLoading(false)
         return
       }
+    }
+
+    // Deterministic raw-statement parser (offline, no AI) for Sparkasse / Revolut.
+    const rawParsed = parseRawStatement(aiText, activeBank)
+    if (rawParsed.length > 0) {
+      setPreview(rawParsed)
+      setAiLoading(false)
+      return
     }
 
     const controller = new AbortController()
@@ -367,7 +380,7 @@ export function ImportPaste({ onImport, onAddImportRecord, onDeleteBatch, import
           <textarea
             value={text}
             onChange={(e) => setText(e.target.value)}
-            placeholder="Вставь сюда отформатированный текст...&#10;&#10;Формат: ДАТА | СУММА | ТИП | ИСТОЧНИК | ОПИСАНИЕ&#10;2024-03-15 | 49.90 | payment | Klarna | Rechnung März"
+            placeholder="Вставь сырую выписку Sparkasse/Revolut — распознается автоматически.&#10;&#10;Или готовый формат: ДАТА | СУММА | ТИП | ИСТОЧНИК | ОПИСАНИЕ&#10;2024-03-15 | 49.90 | payment | Klarna | Rechnung März"
             rows={10}
             className="w-full rounded-md border border-neutral-700 bg-neutral-900 p-3 font-mono text-sm text-neutral-200 placeholder:text-neutral-600 focus:border-neutral-500 focus:outline-none"
           />

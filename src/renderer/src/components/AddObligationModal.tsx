@@ -10,6 +10,7 @@ interface AddObligationModalProps {
   onSave: (obligation: Omit<Obligation, 'id' | 'createdAt'>, klarnaPaidInstallments?: number) => void
   editObligation?: Obligation | null
   preselectedType?: ObligationType
+  preselectedFrequency?: ObligationFrequency
   klarnaPaidCount?: number
 }
 
@@ -64,6 +65,7 @@ export function AddObligationModal({
   onSave,
   editObligation,
   preselectedType,
+  preselectedFrequency,
   klarnaPaidCount,
 }: AddObligationModalProps): React.JSX.Element {
   const [form, setForm] = useState<FormState>(emptyForm)
@@ -88,10 +90,14 @@ export function AddObligationModal({
           paidInstallments: klarnaPaidCount != null ? String(klarnaPaidCount) : '0',
         })
       } else {
-        setForm({ ...emptyForm, type: preselectedType ?? 'subscription' })
+        setForm({
+          ...emptyForm,
+          type: preselectedType ?? 'subscription',
+          frequency: preselectedFrequency ?? 'monthly',
+        })
       }
     }
-  }, [isOpen, editObligation, preselectedType])
+  }, [isOpen, editObligation, preselectedType, preselectedFrequency])
 
   useEffect(() => {
     const handleKey = (e: KeyboardEvent): void => {

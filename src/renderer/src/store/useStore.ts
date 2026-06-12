@@ -25,6 +25,7 @@ import type {
   ChangeLogCategory,
 } from '../types'
 import { computeSnapshot, formatLocalDate } from '../utils/financialEngine'
+import { sanitizeTransaction, sanitizeTransactions } from '../utils/sanitize'
 import { pushHistory } from '../services/historyService'
 import { captureError, pushBreadcrumb } from '../services/errorRegistry'
 
@@ -502,11 +503,12 @@ export function useStore(): UseStoreReturn {
     async (t: Omit<Transaction, 'id' | 'createdAt'>) => {
       try {
         pushBreadcrumb('Добавление транзакции')
-        const transaction: Transaction = {
+        // Central sanitizer: strip sensitive IDs from description before persisting.
+        const transaction: Transaction = sanitizeTransaction({
           ...t,
           id: crypto.randomUUID(),
           createdAt: new Date().toISOString()
-        }
+        })
         await window.api.store.add(transaction)
         await logChange('ADD_TRANSACTION', `Транзакция: ${t.source} ${t.type === 'income' ? '+' : '-'}${t.amount}€`, 'transaction')
         await refresh()
@@ -522,7 +524,8 @@ export function useStore(): UseStoreReturn {
     async (ts: Transaction[]) => {
       try {
         pushBreadcrumb(`Импорт ${ts.length} транзакций`)
-        await window.api.store.addMany(ts)
+        // Central sanitizer: strip sensitive IDs from every imported description.
+        await window.api.store.addMany(sanitizeTransactions(ts))
         await logChange('IMPORT_TRANSACTIONS', `Импортировано ${ts.length} транзакций`, 'import')
         await refresh()
       } catch (e) {

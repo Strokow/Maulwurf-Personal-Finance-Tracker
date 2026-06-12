@@ -80,6 +80,7 @@ export function ObligationsTab({
   const [modalOpen, setModalOpen] = useState(false)
   const [editTarget, setEditTarget] = useState<Obligation | null>(null)
   const [preselectedType, setPreselectedType] = useState<ObligationType>('subscription')
+  const [preselectedFrequency, setPreselectedFrequency] = useState<ObligationFrequency>('monthly')
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null)
   const [newSectionName, setNewSectionName] = useState('')
   const [showAddSection, setShowAddSection] = useState(false)
@@ -462,9 +463,10 @@ export function ObligationsTab({
     })
   }, [active, year, month, now, getMonthRecord])
 
-  const handleOpenAdd = (type: ObligationType): void => {
+  const handleOpenAdd = (type: ObligationType, frequency: ObligationFrequency = 'monthly'): void => {
     setEditTarget(null)
     setPreselectedType(type)
+    setPreselectedFrequency(frequency)
     setModalOpen(true)
   }
 
@@ -555,13 +557,16 @@ export function ObligationsTab({
       }
     } else {
       const beforeObligations = [...obligations]
-      // If viewing a future month, set createdAt to that month so once-obligations appear there
+      // Привязываем createdAt к просматриваемому месяцу, если он не текущий —
+      // тогда обязательство появляется именно в открытом месяце (прошлом ИЛИ будущем),
+      // а once-обязательства не "светятся" в неправильном месяце. В текущем месяце —
+      // createdAt по умолчанию (now), чтобы не сбивать время создания.
       const realNow = new Date()
       const realYear = realNow.getFullYear()
       const realMonth = realNow.getMonth() + 1
-      const isViewingFuture = year > realYear || (year === realYear && month > realMonth)
-      const futureCreatedAt = isViewingFuture ? new Date(year, month - 1, 1).toISOString() : undefined
-      const newObligation = await onAdd(o, futureCreatedAt)
+      const isViewingCurrent = year === realYear && month === realMonth
+      const targetCreatedAt = isViewingCurrent ? undefined : new Date(year, month - 1, 1).toISOString()
+      const newObligation = await onAdd(o, targetCreatedAt)
       // Auto-set status to 'unpaid' for the current month so it appears correctly
       await onStatusChange(newObligation.id, year, month, 'unpaid')
       if (pushUndo) {
@@ -1760,7 +1765,7 @@ export function ObligationsTab({
                     </>
                   )}
                   <button
-                    onClick={() => handleOpenAdd('subscription')}
+                    onClick={() => handleOpenAdd('subscription', 'monthly')}
                     className="flex w-full items-center justify-center gap-2 rounded-xl border border-dashed border-neutral-700 py-2 text-sm text-neutral-500 transition-colors hover:border-neutral-500 hover:text-neutral-300"
                   >
                     <Plus className="h-4 w-4" />
@@ -1810,6 +1815,13 @@ export function ObligationsTab({
                   ) : (
                     yearlyObligations.map((o) => renderObligationWithChildren(o))
                   )}
+                  <button
+                    onClick={() => handleOpenAdd('manual_payment', 'yearly')}
+                    className="flex w-full items-center justify-center gap-2 rounded-xl border border-dashed border-neutral-700 py-2 text-sm text-neutral-500 transition-colors hover:border-neutral-500 hover:text-neutral-300"
+                  >
+                    <Plus className="h-4 w-4" />
+                    Добавить ежегодное
+                  </button>
                 </div>
               </motion.div>
             )}
@@ -1855,7 +1867,7 @@ export function ObligationsTab({
                     onceObligations.map((o) => renderObligationWithChildren(o))
                   )}
                   <button
-                    onClick={() => handleOpenAdd('manual_payment')}
+                    onClick={() => handleOpenAdd('manual_payment', 'once')}
                     className="flex w-full items-center justify-center gap-2 rounded-xl border border-dashed border-neutral-700 py-2 text-sm text-neutral-500 transition-colors hover:border-neutral-500 hover:text-neutral-300"
                   >
                     <Plus className="h-4 w-4" />
@@ -2201,6 +2213,7 @@ export function ObligationsTab({
         onSave={handleSave}
         editObligation={editTarget}
         preselectedType={preselectedType}
+        preselectedFrequency={preselectedFrequency}
         klarnaPaidCount={editTarget ? klarnaPaidCountMap.get(editTarget.id) : undefined}
       />
 
