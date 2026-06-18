@@ -706,6 +706,13 @@ export function ObligationsTab({
 
       if (isSingle) {
         const safePaid = isNaN(paidInstallments) ? 0 : paidInstallments
+        const status: ObligationStatus = safePaid >= 1 ? 'paid' : 'unpaid'
+        // Привязываем единоразовый платёж к ПРОСМАТРИВАЕМОМУ месяцу (как в handleSave):
+        // если открыт не текущий месяц — createdAt = первое число этого месяца, иначе
+        // once-обязательство «светится» в месяце создания (now), а не в открытом будущем.
+        const isViewingCurrent = year === todayYear && month === todayMonth
+        const targetCreatedAt = isViewingCurrent ? undefined : new Date(year, month - 1, 1).toISOString()
+        const beforeObligations = [...obligations]
         const newObligation = await onAdd({
           name: `${merchant} (платёж Klarna ${monthlyAmount.toFixed(2)}€)`,
           type: 'manual_payment',
@@ -713,15 +720,33 @@ export function ObligationsTab({
           approximateDay: null,
           billingChain: 'klarna',
           source: 'Klarna',
-          isActive: safePaid >= 1,
+          isActive: true,
           frequency: 'once',
           totalInstallments: 1,
           originalTotal: monthlyAmount,
-        })
-        await onStatusChange(
-          newObligation.id, todayYear, todayMonth,
-          safePaid >= 1 ? 'paid' : 'unpaid'
-        )
+        }, targetCreatedAt)
+        // Статус пишем в ПРОСМАТРИВАЕМЫЙ месяц (а не в текущий реальный)
+        await onStatusChange(newObligation.id, year, month, status)
+        // Объединённый undo: один откат убирает и обязательство, и его статус-запись
+        // (onStatusChange внутри пушит свой months-only снимок — он остаётся ниже и безвреден,
+        //  как при обычном добавлении в handleSave).
+        if (pushUndo) {
+          const record: ObligationMonth = {
+            obligationId: newObligation.id,
+            year,
+            month,
+            status,
+            actualAmount: null,
+            paidDate: status === 'paid' ? formatLocalDate(new Date()) : undefined,
+          }
+          pushUndo('Добавление обязательства Klarna',
+            { obligations: beforeObligations, obligationMonths },
+            {
+              obligations: [...beforeObligations, newObligation],
+              obligationMonths: [...obligationMonths, record],
+            }
+          )
+        }
       } else {
         const [npYear, npMonthNum, npDay] = klarnaAddNextDate.split('-').map(Number)
         const safePaid = isNaN(paidInstallments) ? 0 : paidInstallments

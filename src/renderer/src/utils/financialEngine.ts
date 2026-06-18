@@ -85,9 +85,19 @@ export function computeSnapshot(data: AppDataExtended): FinancialSnapshot {
   )
 
   // Klarna-обязательства теперь живут как обычные Obligation с billingChain='klarna'
-  const klarnaObligations = data.obligations.filter(
-    (o) => o.isActive && o.billingChain === 'klarna'
-  )
+  const klarnaObligations = data.obligations.filter((o) => {
+    if (!o.isActive || o.billingChain !== 'klarna') return false
+    // Единоразовая (once) Klarna — не ежемесячная: учитываем её ТОЛЬКО в её собственном
+    // месяце и только пока не оплачена. Иначе будущий/прошлый разовый платёж постоянно
+    // вычитался бы из «свободных денег» в каждом месяце.
+    if ((o.frequency ?? 'monthly') === 'once') {
+      const rec = data.obligationMonths.find(
+        (m) => m.obligationId === o.id && m.year === yr0 && m.month === mo0
+      )
+      return (rec?.status ?? 'unknown') === 'unpaid'
+    }
+    return true
+  })
   const monthlyKlarna = klarnaObligations.reduce((s, o) => s + (o.amount ?? 0), 0)
   const freeThisMonth = totalLiquid - monthlyObligations - monthlyKlarna
 

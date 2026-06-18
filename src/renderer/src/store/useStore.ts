@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import type {
   Transaction,
   TransactionPair,
@@ -385,6 +385,11 @@ export function useStore(): UseStoreReturn {
   const [transactions, setTransactions] = useState<Transaction[]>([])
   const [obligations, setObligations] = useState<Obligation[]>([])
   const [obligationMonths, setObligationMonths] = useState<ObligationMonth[]>([])
+  // Зеркало obligationMonths в ref: используется для НАДЁЖНОГО снятия undo-снимков,
+  // не зависящего от тайминга React-updater'а (см. setObligationStatus). Синхронизируется
+  // и из эффекта (любые внешние изменения), и синхронно в местах записи статусов.
+  const obligationMonthsRef = useRef<ObligationMonth[]>([])
+  useEffect(() => { obligationMonthsRef.current = obligationMonths }, [obligationMonths])
   const [importHistory, setImportHistory] = useState<ImportRecord[]>([])
   const [debtResolutions, setDebtResolutions] = useState<DebtResolution[]>([])
   const [ollamaSettings, setOllamaSettingsState] = useState<OllamaSettings>(DEFAULT_OLLAMA_SETTINGS)
@@ -405,6 +410,7 @@ export function useStore(): UseStoreReturn {
     setTransactions(data.transactions)
     setObligations(data.obligations ?? [])
     setObligationMonths(data.obligationMonths ?? [])
+    obligationMonthsRef.current = data.obligationMonths ?? []
     setImportHistory(data.importHistory ?? [])
     setDebtResolutions(data.debtResolutions ?? [])
     setOllamaSettingsState(data.ollamaSettings ?? DEFAULT_OLLAMA_SETTINGS)
@@ -650,23 +656,18 @@ export function useStore(): UseStoreReturn {
         }
         await window.api.store.setObligationMonth(record)
         await logChange('SET_OBLIGATION_STATUS', `Статус обязательства → ${status}`, 'obligation')
-        let snapshotBefore: ObligationMonth[] = []
-        let snapshotAfter: ObligationMonth[] = []
-        setObligationMonths(current => {
-          snapshotBefore = current
-          const existing = current.findIndex(
-            m => m.obligationId === obligationId && m.year === year && m.month === month
-          )
-          let updated: ObligationMonth[]
-          if (existing !== -1) {
-            updated = [...current]
-            updated[existing] = record
-          } else {
-            updated = [...current, record]
-          }
-          snapshotAfter = updated
-          return updated
-        })
+        // ВАЖНО (data-wipe fix): снимки для undo берём из ref, а НЕ захватываем внутри
+        // setState-updater'а. При батчинге (после await) updater мог не успеть выполниться
+        // до pushUndo → snapshotBefore/After оставались [] → undo затирал ВСЕ obligationMonths.
+        const snapshotBefore = obligationMonthsRef.current
+        const existing = snapshotBefore.findIndex(
+          m => m.obligationId === obligationId && m.year === year && m.month === month
+        )
+        const snapshotAfter = existing !== -1
+          ? snapshotBefore.map((m, i) => (i === existing ? record : m))
+          : [...snapshotBefore, record]
+        obligationMonthsRef.current = snapshotAfter // синхронно — чтобы серии вызовов (рассрочки) видели актуальное
+        setObligationMonths(snapshotAfter)
         pushUndo(
           `Статус обязательства → ${status}`,
           { obligationMonths: snapshotBefore },
@@ -968,8 +969,18 @@ export function useStore(): UseStoreReturn {
     }
     if (entry.snapshotBefore.obligationMonths !== undefined) {
       const months = entry.snapshotBefore.obligationMonths as ObligationMonth[]
-      setObligationMonths(months)
-      await window.api.store.setAllObligationMonths(months)
+      // Guard (data-wipe fix): нет легитимного действия, очищающего ВСЕ obligationMonths разом.
+      // Пустой снимок при непустом текущем состоянии = битая undo-запись → не применяем.
+      if (months.length === 0 && obligationMonthsRef.current.length > 0) {
+        captureError(
+          new Error('Undo пропущен: пустой снимок obligationMonths затёр бы все статусы'),
+          'validation_error', 'undo'
+        )
+      } else {
+        obligationMonthsRef.current = months
+        setObligationMonths(months)
+        await window.api.store.setAllObligationMonths(months)
+      }
     }
     if (entry.snapshotBefore.accountBalances !== undefined) {
       const balances = entry.snapshotBefore.accountBalances as AccountBalance[]
@@ -999,8 +1010,17 @@ export function useStore(): UseStoreReturn {
     }
     if (entry.snapshotAfter.obligationMonths !== undefined) {
       const months = entry.snapshotAfter.obligationMonths as ObligationMonth[]
-      setObligationMonths(months)
-      await window.api.store.setAllObligationMonths(months)
+      // Guard (data-wipe fix): см. undo — пустой снимок при непустом состоянии не применяем.
+      if (months.length === 0 && obligationMonthsRef.current.length > 0) {
+        captureError(
+          new Error('Redo пропущен: пустой снимок obligationMonths затёр бы все статусы'),
+          'validation_error', 'redo'
+        )
+      } else {
+        obligationMonthsRef.current = months
+        setObligationMonths(months)
+        await window.api.store.setAllObligationMonths(months)
+      }
     }
     if (entry.snapshotAfter.accountBalances !== undefined) {
       const balances = entry.snapshotAfter.accountBalances as AccountBalance[]
