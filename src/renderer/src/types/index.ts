@@ -82,6 +82,9 @@ export interface Obligation {
   parentId?: string // linked parent obligation id; child auto-pays when parent is paid
   totalInstallments?: number // Klarna: общее количество платежей по рассрочке
   originalTotal?: number // Klarna: изначальная сумма долга (информационно, может не совпадать с monthly × total из-за штрафов)
+  // Эффективно-датированные изменения цены: с месяца `from` ('YYYY-MM') сумма = `amount`.
+  // Месяцы до самой ранней записи используют базовый `amount` выше. Прошлое не затрагивается.
+  amountChanges?: { from: string; amount: number }[]
 }
 
 export interface ObligationMonth {

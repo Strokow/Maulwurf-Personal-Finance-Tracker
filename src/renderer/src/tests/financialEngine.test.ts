@@ -1,6 +1,37 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { computeSnapshot } from '../utils/financialEngine'
+import { computeSnapshot, effectiveAmount } from '../utils/financialEngine'
 import type { AppDataExtended, AccountBalance, Obligation, ObligationMonth } from '../types'
+
+describe('effectiveAmount (помесячная цена с эффективной даты)', () => {
+  const base = { amount: 10 as number | null }
+  it('без amountChanges возвращает базовую цену', () => {
+    expect(effectiveAmount(base, 2026, 7)).toBe(10)
+  })
+  it('месяцы до самой ранней записи используют базовую цену', () => {
+    const o = { amount: 10 as number | null, amountChanges: [{ from: '2026-07', amount: 12 }] }
+    expect(effectiveAmount(o, 2026, 6)).toBe(10) // июнь — прошлое, не затронуто
+  })
+  it('с месяца изменения и далее — новая цена', () => {
+    const o = { amount: 10 as number | null, amountChanges: [{ from: '2026-07', amount: 12 }] }
+    expect(effectiveAmount(o, 2026, 7)).toBe(12)
+    expect(effectiveAmount(o, 2026, 8)).toBe(12)
+    expect(effectiveAmount(o, 2027, 1)).toBe(12)
+  })
+  it('несколько изменений: берётся последнее с from <= месяц', () => {
+    const o = {
+      amount: 10 as number | null,
+      amountChanges: [{ from: '2026-09', amount: 15 }, { from: '2026-07', amount: 12 }],
+    }
+    expect(effectiveAmount(o, 2026, 6)).toBe(10)
+    expect(effectiveAmount(o, 2026, 7)).toBe(12)
+    expect(effectiveAmount(o, 2026, 8)).toBe(12)
+    expect(effectiveAmount(o, 2026, 9)).toBe(15)
+    expect(effectiveAmount(o, 2026, 12)).toBe(15)
+  })
+  it('null базовая цена сохраняется без изменений', () => {
+    expect(effectiveAmount({ amount: null }, 2026, 7)).toBeNull()
+  })
+})
 
 // ── Fixtures ──────────────────────────────────────────────
 function makeAppData(overrides: Partial<AppDataExtended> = {}): AppDataExtended {
@@ -171,6 +202,51 @@ describe('computeSnapshot', () => {
       const snap = computeSnapshot(data)
       expect(snap.monthlyObligationsCount).toBe(3)
     })
+
+    // BUG-022: согласование движка со страницей обязательств.
+    it('monthly без записи за текущий месяц считается как owed (дефолт unpaid)', () => {
+      const obligations = [makeObligation({ id: 'ob-1', amount: 40, frequency: 'monthly' })]
+      const data = makeAppData({
+        accountBalances: [makeBalance('sparkasse', 1000)],
+        obligations,
+        // нет obligationMonths вообще
+      })
+      const snap = computeSnapshot(data)
+      expect(snap.monthlyObligations).toBe(40)
+      expect(snap.monthlyObligationsCount).toBe(1)
+    })
+
+    it('yearly без записи за текущий месяц НЕ считается (дефолт unknown)', () => {
+      const obligations = [makeObligation({ id: 'ob-1', amount: 120, frequency: 'yearly' })]
+      const data = makeAppData({
+        accountBalances: [makeBalance('sparkasse', 1000)],
+        obligations,
+      })
+      const snap = computeSnapshot(data)
+      expect(snap.monthlyObligations).toBe(0)
+      expect(snap.monthlyObligationsCount).toBe(0)
+    })
+
+    it('skipped обязательство исключается из месячной суммы', () => {
+      const now = new Date()
+      const obligations = [makeObligation({ id: 'ob-1', amount: 50, frequency: 'monthly' })]
+      const data = makeAppData({
+        accountBalances: [makeBalance('sparkasse', 1000)],
+        obligations,
+        obligationMonths: [
+          {
+            obligationId: 'ob-1',
+            year: now.getFullYear(),
+            month: now.getMonth() + 1,
+            status: 'skipped',
+            actualAmount: null,
+          },
+        ],
+      })
+      const snap = computeSnapshot(data)
+      expect(snap.monthlyObligations).toBe(0)
+      expect(snap.monthlyObligationsCount).toBe(0)
+    })
   })
 
   describe('Klarna обязательства', () => {
@@ -185,6 +261,34 @@ describe('computeSnapshot', () => {
       const snap = computeSnapshot(data)
       expect(snap.monthlyKlarna).toBeCloseTo(22.19)
       expect(snap.monthlyKlarnaCount).toBe(1)
+    })
+
+    // BUG-022: завершённая рассрочка (оплачено >= всего платежей) не должна вычитаться
+    // из «свободных денег» в месяцах после последнего платежа.
+    it('исключает завершённую рассрочку Klarna из monthlyKlarna', () => {
+      const now = new Date()
+      const y = now.getFullYear()
+      const m = now.getMonth() + 1
+      const data = makeAppData({
+        accountBalances: [makeBalance('sparkasse', 2000)],
+        obligations: [
+          makeObligation({
+            id: 'kl-1',
+            billingChain: 'klarna',
+            amount: 25,
+            isActive: true,
+            frequency: 'monthly',
+            totalInstallments: 2,
+          }),
+        ],
+        obligationMonths: [
+          { obligationId: 'kl-1', year: y, month: m, status: 'paid', actualAmount: 25 },
+          { obligationId: 'kl-1', year: y, month: m === 1 ? 12 : m - 1, status: 'paid', actualAmount: 25 },
+        ],
+      })
+      const snap = computeSnapshot(data)
+      expect(snap.monthlyKlarna).toBe(0)
+      expect(snap.monthlyKlarnaCount).toBe(0)
     })
   })
 

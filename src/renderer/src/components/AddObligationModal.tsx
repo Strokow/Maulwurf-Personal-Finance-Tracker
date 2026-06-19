@@ -7,8 +7,9 @@ import { Button } from './ui/button'
 interface AddObligationModalProps {
   isOpen: boolean
   onClose: () => void
-  onSave: (obligation: Omit<Obligation, 'id' | 'createdAt'>, klarnaPaidInstallments?: number) => void
+  onSave: (obligation: Omit<Obligation, 'id' | 'createdAt'>, klarnaPaidInstallments?: number, priceFromCurrentMonth?: boolean) => void
   editObligation?: Obligation | null
+  editEffectiveAmount?: number | null // эффективная цена открытого месяца для пред-заполнения формы
   preselectedType?: ObligationType
   preselectedFrequency?: ObligationFrequency
   klarnaPaidCount?: number
@@ -64,20 +65,29 @@ export function AddObligationModal({
   onClose,
   onSave,
   editObligation,
+  editEffectiveAmount,
   preselectedType,
   preselectedFrequency,
   klarnaPaidCount,
 }: AddObligationModalProps): React.JSX.Element {
   const [form, setForm] = useState<FormState>(emptyForm)
+  const [priceFromThisMonth, setPriceFromThisMonth] = useState(false)
   const backdropRef = useRef<HTMLDivElement>(null)
+  // Гард от двойной отправки (двойной клик / повторный вызов) → иначе создаётся дубль обязательства.
+  const submittingRef = useRef(false)
 
   useEffect(() => {
     if (isOpen) {
+      submittingRef.current = false
+      setPriceFromThisMonth(false)
       if (editObligation) {
         setForm({
           name: editObligation.name,
           type: editObligation.type,
-          amount: editObligation.amount !== null ? String(editObligation.amount) : '',
+          amount: (() => {
+            const a = editEffectiveAmount !== undefined ? editEffectiveAmount : editObligation.amount
+            return a !== null ? String(a) : ''
+          })(),
           approximateDay:
             editObligation.approximateDay !== null ? String(editObligation.approximateDay) : '',
           billingChain: editObligation.billingChain,
@@ -97,7 +107,7 @@ export function AddObligationModal({
         })
       }
     }
-  }, [isOpen, editObligation, preselectedType, preselectedFrequency])
+  }, [isOpen, editObligation, editEffectiveAmount, preselectedType, preselectedFrequency])
 
   useEffect(() => {
     const handleKey = (e: KeyboardEvent): void => {
@@ -113,6 +123,8 @@ export function AddObligationModal({
 
   const handleSave = (): void => {
     if (!form.name.trim()) return
+    if (submittingRef.current) return // защита от двойной отправки → дубль обязательства
+    submittingRef.current = true
     const isKlarna = form.billingChain === 'klarna'
     const paidInst = isKlarna && form.paidInstallments ? parseInt(form.paidInstallments, 10) : undefined
     onSave({
@@ -128,7 +140,7 @@ export function AddObligationModal({
       yearlyMonth: form.frequency === 'yearly' && form.yearlyMonth ? parseInt(form.yearlyMonth, 10) : null,
       totalInstallments: isKlarna && form.totalInstallments ? parseInt(form.totalInstallments, 10) : undefined,
       originalTotal: isKlarna && form.originalTotal ? parseFloat(form.originalTotal) : undefined,
-    }, paidInst)
+    }, paidInst, priceFromThisMonth)
     onClose()
   }
 
@@ -233,6 +245,18 @@ export function AddObligationModal({
                   />
                 </div>
               </div>
+
+              {editObligation && (form.frequency === 'monthly' || form.frequency === 'yearly') && (
+                <label className="flex items-start gap-2 text-xs text-neutral-300 cursor-pointer select-none rounded-md border border-neutral-700 bg-neutral-800/50 px-3 py-2">
+                  <input
+                    type="checkbox"
+                    checked={priceFromThisMonth}
+                    onChange={(e) => setPriceFromThisMonth(e.target.checked)}
+                    className="mt-0.5 h-4 w-4 shrink-0 accent-pink-600"
+                  />
+                  <span>Изменить цену <b>только с открытого месяца</b> вперёд — прошлые месяцы сохранят старую сумму.</span>
+                </label>
+              )}
 
               <div className="grid grid-cols-2 gap-3">
                 <div>

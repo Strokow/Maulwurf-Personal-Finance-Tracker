@@ -24,7 +24,7 @@ import type {
   ChangeLogEntry,
   ChangeLogCategory,
 } from '../types'
-import { computeSnapshot, formatLocalDate } from '../utils/financialEngine'
+import { computeSnapshot, formatLocalDate, effectiveAmount } from '../utils/financialEngine'
 import { sanitizeTransaction, sanitizeTransactions } from '../utils/sanitize'
 import { pushHistory } from '../services/historyService'
 import { captureError, pushBreadcrumb } from '../services/errorRegistry'
@@ -342,11 +342,13 @@ export interface UseStoreReturn {
     year: number,
     month: number,
     status: ObligationStatus,
-    transactionId?: string
+    transactionId?: string,
+    skipUndo?: boolean
   ) => Promise<void>
   getObligationMonth: (obligationId: string, year: number, month: number) => ObligationMonth | null
   carryObligationDebt: (obligationId: string, fromYear: number, fromMonth: number, toYear: number, toMonth: number) => Promise<void>
   setCarriedPaid: (obligationId: string, year: number, month: number, paid: boolean) => Promise<void>
+  returnCarriedObligation: (obligationId: string, year: number, month: number) => Promise<void>
   autoMatchObligations: (transactions: Transaction[]) => Promise<void>
   clearAllTransactions: () => Promise<void>
   addImportRecord: (record: ImportRecord) => Promise<void>
@@ -641,7 +643,8 @@ export function useStore(): UseStoreReturn {
       year: number,
       month: number,
       status: ObligationStatus,
-      transactionId?: string
+      transactionId?: string,
+      skipUndo = false
     ) => {
       try {
         pushBreadcrumb(`Статус обязательства ${obligationId} → ${status}`)
@@ -668,11 +671,16 @@ export function useStore(): UseStoreReturn {
           : [...snapshotBefore, record]
         obligationMonthsRef.current = snapshotAfter // синхронно — чтобы серии вызовов (рассрочки) видели актуальное
         setObligationMonths(snapshotAfter)
-        pushUndo(
-          `Статус обязательства → ${status}`,
-          { obligationMonths: snapshotBefore },
-          { obligationMonths: snapshotAfter }
-        )
+        // skipUndo: вызывающий (handleStatusToggle) сам пушит ОДИН объединённый undo на всю
+        // операцию (статус + дети + carryover). Без этого каждый внутренний вызов добавлял бы
+        // свою запись → на одно нажатие 2+ undo-записей (BUG-022).
+        if (!skipUndo) {
+          pushUndo(
+            `Статус обязательства → ${status}`,
+            { obligationMonths: snapshotBefore },
+            { obligationMonths: snapshotAfter }
+          )
+        }
       } catch (e) {
         captureError(e, 'ipc_error', 'setObligationStatus')
         throw e
@@ -696,19 +704,21 @@ export function useStore(): UseStoreReturn {
     async (obligationId: string, fromYear: number, fromMonth: number, toYear: number, toMonth: number) => {
       try {
         pushBreadcrumb(`Перенос долга ${obligationId} → ${toYear}/${toMonth}`)
+        const current = obligationMonthsRef.current
         const obligation = obligations.find(o => o.id === obligationId)
         // Если источник уже оплачен — долг считается погашённым (платёж был, просто с опозданием)
-        const sourceRecord = obligationMonths.find(
+        const sourceRecord = current.find(
           m => m.obligationId === obligationId && m.year === fromYear && m.month === fromMonth
         )
         const sourcePaid = sourceRecord?.status === 'paid'
         // BUG-009: для подписок с amount=null берём фактическую сумму из исходного месяца,
         // иначе carriedAmount = undefined → дальнейшая математика трактует как 0.
-        const carriedAmount = obligation?.amount ?? sourceRecord?.actualAmount ?? undefined
+        const carriedAmount = (obligation ? effectiveAmount(obligation, fromYear, fromMonth) : null) ?? sourceRecord?.actualAmount ?? undefined
         // Merge с существующей записью целевого месяца (сохраняем status, actualAmount, paidDate)
-        const existing = obligationMonths.find(
+        const idx = current.findIndex(
           m => m.obligationId === obligationId && m.year === toYear && m.month === toMonth
         )
+        const existing = idx !== -1 ? current[idx] : undefined
         const record: ObligationMonth = existing
           ? {
               ...existing,
@@ -731,52 +741,91 @@ export function useStore(): UseStoreReturn {
               carriedPaid: sourcePaid,
             }
         await window.api.store.setObligationMonth(record)
-        setObligationMonths(current => {
-          const idx = current.findIndex(
-            m => m.obligationId === obligationId && m.year === toYear && m.month === toMonth
-          )
-          if (idx !== -1) {
-            const updated = [...current]
-            updated[idx] = record
-            return updated
-          }
-          return [...current, record]
-        })
+        await logChange('CARRY_OBLIGATION', `Долг перенесён на ${toMonth}/${toYear}`, 'obligation')
+        // Снимок для undo — из ref (надёжно, как в BUG-017); ранее carry вообще не был undoable.
+        const after = idx !== -1
+          ? current.map((m, i) => (i === idx ? record : m))
+          : [...current, record]
+        obligationMonthsRef.current = after
+        setObligationMonths(after)
+        pushUndo('Перенос долга', { obligationMonths: current }, { obligationMonths: after })
       } catch (e) {
         captureError(e, 'ipc_error', 'carryObligationDebt')
         throw e
       }
     },
-    [obligations, obligationMonths]
+    [obligations]
   )
 
   const setCarriedPaid = useCallback(
     async (obligationId: string, year: number, month: number, paid: boolean) => {
       try {
         pushBreadcrumb(`Оплата перенесённого долга ${obligationId}`)
-        const existing = obligationMonths.find(
+        const current = obligationMonthsRef.current
+        const idx = current.findIndex(
           m => m.obligationId === obligationId && m.year === year && m.month === month
         )
-        if (!existing) return
-        const record: ObligationMonth = { ...existing, carriedPaid: paid }
+        if (idx === -1) return
+        const record: ObligationMonth = { ...current[idx], carriedPaid: paid }
         await window.api.store.setObligationMonth(record)
-        setObligationMonths(current => {
-          const idx = current.findIndex(
-            m => m.obligationId === obligationId && m.year === year && m.month === month
-          )
-          if (idx !== -1) {
-            const updated = [...current]
-            updated[idx] = record
-            return updated
-          }
-          return current
-        })
+        await logChange('SET_CARRIED_PAID', `Перенесённый долг ${paid ? 'погашен' : 'не погашен'}`, 'obligation')
+        const after = current.map((m, i) => (i === idx ? record : m))
+        obligationMonthsRef.current = after
+        setObligationMonths(after)
+        pushUndo('Погашение перенесённого долга', { obligationMonths: current }, { obligationMonths: after })
       } catch (e) {
         captureError(e, 'ipc_error', 'setCarriedPaid')
         throw e
       }
     },
-    [obligationMonths]
+    []
+  )
+
+  // Возврат перенесённого обязательства в исходный месяц (реверс carryObligationDebt).
+  // Умный реверс: если запись целевого месяца создана только переносом (нет независимого
+  // факта оплаты) — удаляем её целиком; иначе снимаем только перенос-метки, сохраняя статус.
+  const returnCarriedObligation = useCallback(
+    async (obligationId: string, year: number, month: number) => {
+      try {
+        pushBreadcrumb(`Возврат переноса ${obligationId} ${year}/${month}`)
+        const current = obligationMonthsRef.current
+        const idx = current.findIndex(
+          m => m.obligationId === obligationId && m.year === year && m.month === month
+        )
+        if (idx === -1) return
+        const target = current[idx]
+        if (!target.isCarriedOver) return
+        const isPureCarry =
+          target.status !== 'paid' &&
+          target.actualAmount == null &&
+          target.matchedTransactionId == null &&
+          target.carriedPaid !== true
+        const after: ObligationMonth[] = isPureCarry
+          ? current.filter((_, i) => i !== idx)
+          : current.map((m, i) =>
+              i === idx
+                ? {
+                    ...m,
+                    isCarriedOver: false,
+                    carriedFromYear: undefined,
+                    carriedFromMonth: undefined,
+                    carriedAmount: undefined,
+                    carriedPaid: undefined,
+                  }
+                : m
+            )
+        // Bulk replace через setAllObligationMonths — нужно, т.к. умный реверс может УДАЛЯТЬ запись.
+        await window.api.store.setAllObligationMonths(after)
+        await logChange('RETURN_CARRIED', `Перенос отменён (${month}/${year})`, 'obligation')
+        obligationMonthsRef.current = after
+        setObligationMonths(after)
+        pushUndo('Возврат переноса', { obligationMonths: current }, { obligationMonths: after })
+      } catch (e) {
+        captureError(e, 'ipc_error', 'returnCarriedObligation')
+        throw e
+      }
+    },
+    []
   )
 
   const autoMatchObligations = useCallback(
@@ -1176,6 +1225,7 @@ export function useStore(): UseStoreReturn {
     getObligationMonth,
     carryObligationDebt,
     setCarriedPaid,
+    returnCarriedObligation,
     autoMatchObligations,
     clearAllTransactions,
     addImportRecord,

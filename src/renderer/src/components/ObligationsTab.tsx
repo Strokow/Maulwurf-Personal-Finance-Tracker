@@ -29,7 +29,7 @@ import type {
 } from '../types'
 import { ObligationCard } from './ObligationCard'
 import { AddObligationModal } from './AddObligationModal'
-import { clampDayToMonth, formatLocalDate } from '../utils/financialEngine'
+import { clampDayToMonth, formatLocalDate, effectiveAmount } from '../utils/financialEngine'
 
 interface ObligationsTabProps {
   obligations: Obligation[]
@@ -44,7 +44,9 @@ interface ObligationsTabProps {
     obligationId: string,
     year: number,
     month: number,
-    status: ObligationStatus
+    status: ObligationStatus,
+    transactionId?: string,
+    skipUndo?: boolean
   ) => Promise<void>
   getMonthRecord: (obligationId: string, year: number, month: number) => ObligationMonth | null
   onUndo?: () => Promise<void>
@@ -55,6 +57,7 @@ interface ObligationsTabProps {
   onRenameSection: (id: string, name: string) => Promise<void>
   onCarryDebt: (obligationId: string, fromYear: number, fromMonth: number, toYear: number, toMonth: number) => Promise<void>
   onSetCarriedPaid: (obligationId: string, year: number, month: number, paid: boolean) => Promise<void>
+  onReturnCarried: (obligationId: string, year: number, month: number) => Promise<void>
 }
 
 export function ObligationsTab({
@@ -76,6 +79,7 @@ export function ObligationsTab({
   onRenameSection,
   onCarryDebt,
   onSetCarriedPaid,
+  onReturnCarried,
 }: ObligationsTabProps): React.JSX.Element {
   const [modalOpen, setModalOpen] = useState(false)
   const [editTarget, setEditTarget] = useState<Obligation | null>(null)
@@ -169,7 +173,8 @@ export function ObligationsTab({
   const canGoNext = useMemo(() => {
     const now = new Date()
     const nextMonth = new Date(year, month, 1)
-    return nextMonth <= new Date(now.getFullYear(), now.getMonth() + 1, 1)
+    // Планирование бюджета до 3 месяцев вперёд (раньше — только следующий месяц).
+    return nextMonth <= new Date(now.getFullYear(), now.getMonth() + 3, 1)
   }, [year, month])
 
   const active = obligations.filter((o) => {
@@ -251,8 +256,9 @@ export function ObligationsTab({
   // Yearly/once без записи → 'unknown'.
   const getEffectiveStatus = useCallback((o: Obligation, rec: ObligationMonth | null): ObligationStatus => {
     if (rec?.status != null) return rec.status
-    const isMonthly = !o.frequency || o.frequency === 'monthly'
-    return isMonthly ? 'unpaid' : 'unknown'
+    // yearly → 'unknown' (неизвестно, due ли в этом месяце); monthly и once → 'unpaid'.
+    // Once виден только в своём месяце создания, где платёж реально предстоит.
+    return o.frequency === 'yearly' ? 'unknown' : 'unpaid'
   }, [])
 
   // Apply filters
@@ -302,7 +308,9 @@ export function ObligationsTab({
     })
   }, [filtered, sortBy, getMonthRecord, year, month, isYearlyCovered])
 
-  const monthlyObligations = sorted.filter((o) => (o.frequency ?? 'monthly') === 'monthly' && !o.sectionId && !o.parentId)
+  // Klarna (любой frequency) живёт в своей секции и исключён из monthly/yearly/once,
+  // иначе единоразовое (once) Klarna падало в «Единоразовые» (BUG-019).
+  const monthlyObligations = sorted.filter((o) => (o.frequency ?? 'monthly') === 'monthly' && o.billingChain !== 'klarna' && !o.sectionId && !o.parentId)
   const regularMonthly = monthlyObligations.filter((o) => o.billingChain !== 'klarna')
   const regularMonthlyUnpaid = regularMonthly.filter((o) => {
     const rec = getMonthRecord(o.id, year, month)
@@ -312,9 +320,9 @@ export function ObligationsTab({
     const rec = getMonthRecord(o.id, year, month)
     return rec?.status === 'paid'
   })
-  const klarnaMonthly = monthlyObligations.filter((o) => o.billingChain === 'klarna')
-  const yearlyObligations = sorted.filter((o) => o.frequency === 'yearly' && !o.sectionId && !o.parentId)
-  const onceObligations = sorted.filter((o) => o.frequency === 'once' && !o.sectionId && !o.parentId)
+  const klarnaMonthly = sorted.filter((o) => o.billingChain === 'klarna' && !o.sectionId && !o.parentId)
+  const yearlyObligations = sorted.filter((o) => o.frequency === 'yearly' && o.billingChain !== 'klarna' && !o.sectionId && !o.parentId)
+  const onceObligations = sorted.filter((o) => o.frequency === 'once' && o.billingChain !== 'klarna' && !o.sectionId && !o.parentId)
 
   // Map Klarna obligation IDs to count of paid ObligationMonth records
   const klarnaPaidCountMap = useMemo(() => {
@@ -349,6 +357,10 @@ export function ObligationsTab({
 
   const totalMonthlyFiltered = useMemo(() => {
     return filtered.reduce((sum, o) => {
+      // Завершённая рассрочка Klarna (оплачено >= всего платежей) больше ничего не должна,
+      // но в месяцах после последнего платежа у неё нет записи → дефолт monthly 'unpaid'
+      // ложно добавлял её сумму в «Осталось оплатить» (BUG-022).
+      if (isKlarnaCompleted(o)) return sum
       // Долг перенесён ИЗ этого месяца → исключаем полностью
       if (carryDestMap.has(o.id)) return sum
 
@@ -360,7 +372,7 @@ export function ObligationsTab({
         if (o.yearlyMonth != null && o.yearlyMonth !== month) return sum
       }
 
-      const base = o.amount ?? 0
+      const base = effectiveAmount(o, year, month) ?? 0
 
       // Новая система isCarriedOver: считаем каждую часть отдельно
       if (rec?.isCarriedOver) {
@@ -378,12 +390,12 @@ export function ObligationsTab({
 
       return sum + base
     }, 0)
-  }, [filtered, isYearlyCovered, getMonthRecord, year, month, getEffectiveStatus, carryDestMap])
+  }, [filtered, isYearlyCovered, getMonthRecord, year, month, getEffectiveStatus, carryDestMap, isKlarnaCompleted])
 
   const totalPaidFiltered = useMemo(() => {
     return filtered.reduce((sum, o) => {
       const rec = getMonthRecord(o.id, year, month)
-      const base = o.amount ?? 0
+      const base = effectiveAmount(o, year, month) ?? 0
 
       if (rec?.isCarriedOver) {
         const carriedPart = rec.carriedPaid ? (rec.carriedAmount ?? 0) : 0
@@ -396,7 +408,7 @@ export function ObligationsTab({
     }, 0)
   }, [filtered, getMonthRecord, year, month])
 
-  const yearlyTotal = yearlyObligations.reduce((s, o) => s + (o.amount ?? 0), 0)
+  const yearlyTotal = yearlyObligations.reduce((s, o) => s + (effectiveAmount(o, year, month) ?? 0), 0)
 
   const carryoverFiltered = useMemo(() => {
     let total = 0
@@ -422,6 +434,8 @@ export function ObligationsTab({
   }).length
 
   const pendingCount = filtered.filter((o) => {
+    // Завершённая Klarna ничего не ожидает (симметрично paidCount и totalMonthlyFiltered, BUG-022)
+    if (isKlarnaCompleted(o)) return false
     // Долг перенесён ИЗ этого месяца → больше не "ожидает оплаты" здесь
     if (carryDestMap.has(o.id)) return false
     if (o.frequency === 'yearly') {
@@ -434,8 +448,7 @@ export function ObligationsTab({
     // Explicitly unknown → excluded
     if (rec && rec.status === 'unknown') return false
     // Monthly obligations default to 'unpaid' even without a record
-    const isMonthlyObl = !o.frequency || o.frequency === 'monthly'
-    if (!rec && !isMonthlyObl && !carryoverMap.has(o.id)) return false
+    if (!rec && o.frequency === 'yearly' && !carryoverMap.has(o.id)) return false
     // 'unpaid' or monthly without record or carryover → pending
     return true
   }).length
@@ -500,18 +513,27 @@ export function ObligationsTab({
     }
   }
 
-  const handleSave = async (o: Omit<Obligation, 'id' | 'createdAt'>, klarnaPaidInstallments?: number): Promise<void> => {
+  const handleSave = async (o: Omit<Obligation, 'id' | 'createdAt'>, klarnaPaidInstallments?: number, priceFromCurrentMonth?: boolean): Promise<void> => {
     if (editTarget) {
+      // #1: «Изменить цену только с открытого месяца» — не трогаем базовый amount,
+      // добавляем эффективно-датированную запись в amountChanges с месяца просмотра.
+      let patch = o
+      if (priceFromCurrentMonth && o.amount != null) {
+        const key = `${year}-${String(month).padStart(2, '0')}`
+        const prevChanges = (editTarget.amountChanges ?? []).filter(c => c.from !== key)
+        const newChanges = [...prevChanges, { from: key, amount: o.amount }].sort((a, b) => a.from.localeCompare(b.from))
+        patch = { ...o, amount: editTarget.amount, amountChanges: newChanges }
+      }
       if (pushUndo) {
         pushUndo('Изменение обязательства',
           { obligations, obligationMonths },
           {
-            obligations: obligations.map(ob => ob.id === editTarget.id ? { ...ob, ...o } : ob),
+            obligations: obligations.map(ob => ob.id === editTarget.id ? { ...ob, ...patch } : ob),
             obligationMonths
           }
         )
       }
-      await onUpdate(editTarget.id, o)
+      await onUpdate(editTarget.id, patch)
 
       // Klarna: recalculate ObligationMonth records when paid count changes
       if (editTarget.billingChain === 'klarna' && klarnaPaidInstallments != null) {
@@ -803,7 +825,10 @@ export function ObligationsTab({
     // Save current state for undo BEFORE change
     const beforeState = { obligationMonths: [...obligationMonths] }
 
-    await onStatusChange(obligationId, year, month, status)
+    // skipUndo=true: внутренние вызовы НЕ пишут собственный undo — ниже пушим ОДИН
+    // объединённый undo на всю операцию (статус + дети + carryover). Иначе одно нажатие
+    // давало 2+ undo-записей и кнопку «Отменить» приходилось жать дважды (BUG-022).
+    await onStatusChange(obligationId, year, month, status, undefined, true)
 
     // When marking as 'paid', also mark any carryover (unpaid) months as paid.
     // Scan obligationMonths directly to avoid stale closure issues with carryoverMap/getMonthRecord.
@@ -840,14 +865,14 @@ export function ObligationsTab({
     const childObligations = obligations.filter(o => o.parentId === obligationId)
     for (const child of childObligations) {
       const childRecord = getMonthRecord(child.id, year, month)
-      await onStatusChange(child.id, year, month, status)
+      await onStatusChange(child.id, year, month, status, undefined, true)
       if (status === 'paid' && !childRecord?.isCarriedOver) {
         collectCarryover(child.id)
       }
     }
 
     for (const { y, m, oId } of carryoverMonthsToPay) {
-      await onStatusChange(oId, y, m, 'paid')
+      await onStatusChange(oId, y, m, 'paid', undefined, true)
     }
 
     // After change, push undo with correct before/after
@@ -998,21 +1023,34 @@ export function ObligationsTab({
     const obligation = obligations.find(o => o.id === obligationId)
     if (!obligation) return
 
+    let patch: Partial<Obligation> | null = null
     if (targetSection === 'monthly') {
       if ((obligation.frequency ?? 'monthly') === 'monthly' && !obligation.sectionId && !obligation.parentId) return
-      await onUpdate(obligationId, { frequency: 'monthly', sectionId: undefined, parentId: undefined })
+      patch = { frequency: 'monthly', sectionId: undefined, parentId: undefined }
     } else if (targetSection === 'yearly') {
       if (obligation.frequency === 'yearly' && !obligation.sectionId && !obligation.parentId) return
-      await onUpdate(obligationId, { frequency: 'yearly', sectionId: undefined, parentId: undefined })
+      patch = { frequency: 'yearly', sectionId: undefined, parentId: undefined }
     } else if (targetSection === 'once') {
       if (obligation.frequency === 'once' && !obligation.sectionId && !obligation.parentId) return
-      await onUpdate(obligationId, { frequency: 'once', sectionId: undefined, parentId: undefined })
+      patch = { frequency: 'once', sectionId: undefined, parentId: undefined }
     } else {
       // Custom section
       if (obligation.sectionId === targetSection && !obligation.parentId) return
-      await onUpdate(obligationId, { sectionId: targetSection, parentId: undefined })
+      patch = { sectionId: targetSection, parentId: undefined }
     }
-  }, [obligations, onUpdate])
+    if (!patch) return
+
+    // Drag-drop теперь undoable (BUG-019): раньше onUpdate не писал undo → после undo/redo
+    // frequency/sectionId рассинхронизировались и обязательство «терялось».
+    const beforeObligations = [...obligations]
+    await onUpdate(obligationId, patch)
+    if (pushUndo) {
+      pushUndo('Перемещение обязательства',
+        { obligations: beforeObligations },
+        { obligations: beforeObligations.map(o => (o.id === obligationId ? { ...o, ...patch } : o)) }
+      )
+    }
+  }, [obligations, onUpdate, pushUndo])
 
   const handleAddSection = useCallback(async () => {
     const name = newSectionName.trim()
@@ -1124,6 +1162,10 @@ export function ObligationsTab({
     await onSetCarriedPaid(obligationId, year, month, true)
   }, [onSetCarriedPaid, year, month])
 
+  const handleReturnCarried = useCallback(async (obligationId: string) => {
+    await onReturnCarried(obligationId, year, month)
+  }, [onReturnCarried, year, month])
+
   const handlePayAll = useCallback(async (obligationId: string) => {
     await onStatusChange(obligationId, year, month, 'paid')
     await onSetCarriedPaid(obligationId, year, month, true)
@@ -1134,9 +1176,12 @@ export function ObligationsTab({
     const children = childrenMap.get(o.id) ?? []
     const isParent = children.length > 0
 
-    // Кнопка переноса долга: доступна для всех обязательств (включая yearly/once),
-    // если долг ещё не перенесён из этого месяца. Всегда переносит в следующий nav-месяц.
+    // Кнопка переноса долга: только monthly. У once/yearly перенос терял сумму —
+    // once не рендерится в целевом месяце (фильтр active), а из месяца-источника
+    // исключается через carryDestMap → долг исчезал из всех итогов (BUG-022, BUG-018).
+    // Всегда переносит в следующий nav-месяц.
     const getCarryHandler = (ob: Obligation): (() => void) | undefined => {
+      if ((ob.frequency ?? 'monthly') !== 'monthly') return undefined
       if (carryDestMap.has(ob.id)) return undefined // уже перенесено
       const nextY = month === 12 ? year + 1 : year
       const nextM = month === 12 ? 1 : month + 1
@@ -1176,6 +1221,8 @@ export function ObligationsTab({
             carriedToMonth={carryDest?.toMonth}
             onPayCarried={() => { void handlePayCarried(o.id) }}
             onPayAll={() => { void handlePayAll(o.id) }}
+            onReturnCarried={() => { void handleReturnCarried(o.id) }}
+            effectiveAmt={effectiveAmount(o, year, month)}
           />
         </div>
         {children.length > 0 && (
@@ -1217,6 +1264,8 @@ export function ObligationsTab({
                       carriedToMonth={childCarryDest?.toMonth}
                       onPayCarried={() => { void handlePayCarried(child.id) }}
                       onPayAll={() => { void handlePayAll(child.id) }}
+                      onReturnCarried={() => { void handleReturnCarried(child.id) }}
+                      effectiveAmt={effectiveAmount(child, year, month)}
                     />
                   </div>
                 )
@@ -1233,7 +1282,7 @@ export function ObligationsTab({
         )}
       </div>
     )
-  }, [childrenMap, linkDropTarget, childAreaDropTarget, handleDragStart, handleDrag, handleDragEnd, handleCardDragOver, handleCardDragLeave, handleCardDrop, handleChildAreaDragOver, handleChildAreaDragLeave, handleChildAreaDrop, getMonthRecord, year, month, carryoverMap, carryDestMap, yearlyPaidUntilMap, handleEdit, handleDelete, handleStatusToggle, handleCopyToMonth, handleUnlink, klarnaPaidCountMap, onCarryDebt, handlePayCarried, handlePayAll])
+  }, [childrenMap, linkDropTarget, childAreaDropTarget, handleDragStart, handleDrag, handleDragEnd, handleCardDragOver, handleCardDragLeave, handleCardDrop, handleChildAreaDragOver, handleChildAreaDragLeave, handleChildAreaDrop, getMonthRecord, year, month, carryoverMap, carryDestMap, yearlyPaidUntilMap, handleEdit, handleDelete, handleStatusToggle, handleCopyToMonth, handleUnlink, klarnaPaidCountMap, onCarryDebt, handlePayCarried, handlePayAll, handleReturnCarried])
 
   const handleExportMD = useCallback(async () => {
     const fmtEur = (n: number): string => n.toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })
@@ -1251,8 +1300,8 @@ export function ObligationsTab({
         const rec = getMonthRecord(o.id, year, month)
         const st = isYearlyCovered(o)
           ? 'paid'
-          : (rec?.status ?? ((!o.frequency || o.frequency === 'monthly') ? 'unpaid' : 'unknown')) as ObligationStatus
-        const amt = o.amount !== null ? fmtEur(o.amount) : '—'
+          : (rec?.status ?? (o.frequency === 'yearly' ? 'unknown' : 'unpaid')) as ObligationStatus
+        const ea = effectiveAmount(o, year, month); const amt = ea !== null ? fmtEur(ea) : '—'
         const dayStr = o.approximateDay !== null ? `~${o.approximateDay}` : ''
         const notes = (o.notes ?? '').replace(/\|/g, '\\|').replace(/\n/g, ' ')
         const name = o.name.replace(/\|/g, '\\|')
@@ -1261,22 +1310,25 @@ export function ObligationsTab({
       return `\n## ${title} (${items.length})\n\n| Название | Период | Сумма | Дата | Статус | Заметки |\n|---|---|---|---|---|---|\n${rows}\n`
     }
 
-    const monthlyAll = allSorted.filter(o => (o.frequency ?? 'monthly') === 'monthly' && !o.sectionId && !o.parentId)
-    const yearlyAll = allSorted.filter(o => o.frequency === 'yearly' && !o.sectionId && !o.parentId)
-    const onceAll = allSorted.filter(o => o.frequency === 'once' && !o.sectionId && !o.parentId)
+    // BUG-019: Klarna (любой frequency) — отдельный раздел, исключён из monthly/yearly/once.
+    const klarnaAll = allSorted.filter(o => o.billingChain === 'klarna' && !o.sectionId && !o.parentId)
+    const monthlyAll = allSorted.filter(o => (o.frequency ?? 'monthly') === 'monthly' && o.billingChain !== 'klarna' && !o.sectionId && !o.parentId)
+    const yearlyAll = allSorted.filter(o => o.frequency === 'yearly' && o.billingChain !== 'klarna' && !o.sectionId && !o.parentId)
+    const onceAll = allSorted.filter(o => o.frequency === 'once' && o.billingChain !== 'klarna' && !o.sectionId && !o.parentId)
     const allCustomMd = customSections
       .map(s => renderGroupMd(s.name, allSorted.filter(o => o.sectionId === s.id)))
       .join('')
 
     // Compute totals from all active (not filtered by UI search/status/type)
     const totalPayable = allSorted.reduce((sum, o) => {
+      if (isKlarnaCompleted(o)) return sum
       if (carryDestMap.has(o.id)) return sum
       const rec = getMonthRecord(o.id, year, month)
       if (o.frequency === 'yearly') {
         if (isYearlyCovered(o)) return sum
         if (o.yearlyMonth != null && o.yearlyMonth !== month) return sum
       }
-      const base = o.amount ?? 0
+      const base = effectiveAmount(o, year, month) ?? 0
       if (rec?.isCarriedOver) {
         const cp = rec.carriedPaid ? 0 : (rec.carriedAmount ?? 0)
         const cur = rec.status === 'paid' ? 0 : base
@@ -1285,14 +1337,13 @@ export function ObligationsTab({
       }
       if (rec?.status === 'paid') return sum
       if (rec && rec.status === 'unknown') return sum
-      const isMonthlyObl = !o.frequency || o.frequency === 'monthly'
-      if (!rec && !isMonthlyObl) return sum
+      if (!rec && o.frequency === 'yearly') return sum
       return sum + base
     }, 0)
 
     const totalPaidAmt = allSorted.reduce((sum, o) => {
       const rec = getMonthRecord(o.id, year, month)
-      const base = o.amount ?? 0
+      const base = effectiveAmount(o, year, month) ?? 0
       if (rec?.isCarriedOver) {
         return sum + (rec.carriedPaid ? (rec.carriedAmount ?? 0) : 0) + (rec.status === 'paid' ? base : 0)
       }
@@ -1306,6 +1357,7 @@ export function ObligationsTab({
     }).length
 
     const pendingCountAll = allSorted.filter(o => {
+      if (isKlarnaCompleted(o)) return false
       if (carryDestMap.has(o.id)) return false
       if (o.frequency === 'yearly') {
         if (isYearlyCovered(o)) return false
@@ -1314,8 +1366,7 @@ export function ObligationsTab({
       const rec = getMonthRecord(o.id, year, month)
       if (rec?.status === 'paid') return false
       if (rec && rec.status === 'unknown') return false
-      const isMonthlyObl = !o.frequency || o.frequency === 'monthly'
-      if (!rec && !isMonthlyObl) return false
+      if (!rec && o.frequency === 'yearly') return false
       return true
     }).length
 
@@ -1332,12 +1383,15 @@ export function ObligationsTab({
       `| Оплачено | ${fmtEur(totalPaidAmt)} (${paidCountAll} поз.) |`,
       `| Ожидают оплаты | ${pendingCountAll} |`,
       renderGroupMd('Ежемесячные', monthlyAll),
+      renderGroupMd('Klarna', klarnaAll),
       renderGroupMd('Ежегодные', yearlyAll),
       renderGroupMd('Единоразовые', onceAll),
       allCustomMd,
     ].join('\n')
 
-    await window.api.exportMd(md, `Обязательства_${year}_${String(month).padStart(2, '0')}.md`)
+    const _d = new Date()
+    const stamp = `${String(_d.getDate()).padStart(2, '0')}.${String(_d.getMonth() + 1).padStart(2, '0')}.${String(_d.getFullYear()).slice(-2)}`
+    await window.api.exportMd(md, `maulwurf обязательства ${stamp}.md`)
   }, [
     active, customSections,
     getMonthRecord, year, month, currentMonthLabel,
@@ -1368,8 +1422,8 @@ export function ObligationsTab({
         const rec = getMonthRecord(o.id, year, month)
         const st = isYearlyCovered(o)
           ? 'paid'
-          : (rec?.status ?? ((!o.frequency || o.frequency === 'monthly') ? 'unpaid' : 'unknown')) as ObligationStatus
-        const amt = o.amount !== null ? fmtEur(o.amount) : '—'
+          : (rec?.status ?? (o.frequency === 'yearly' ? 'unknown' : 'unpaid')) as ObligationStatus
+        const ea = effectiveAmount(o, year, month); const amt = ea !== null ? fmtEur(ea) : '—'
         const dayStr = o.approximateDay !== null ? `~${o.approximateDay} число` : ''
         return `<tr>
           <td style="padding:8px 12px;border-bottom:1px solid #ddd">${o.name}</td>
@@ -1394,20 +1448,23 @@ export function ObligationsTab({
         </table>`
     }
 
-    const monthlyAll = allSorted.filter(o => (o.frequency ?? 'monthly') === 'monthly' && !o.sectionId && !o.parentId)
-    const yearlyAll = allSorted.filter(o => o.frequency === 'yearly' && !o.sectionId && !o.parentId)
-    const onceAll = allSorted.filter(o => o.frequency === 'once' && !o.sectionId && !o.parentId)
+    // BUG-019: Klarna (любой frequency) — отдельный раздел, исключён из monthly/yearly/once.
+    const klarnaAll = allSorted.filter(o => o.billingChain === 'klarna' && !o.sectionId && !o.parentId)
+    const monthlyAll = allSorted.filter(o => (o.frequency ?? 'monthly') === 'monthly' && o.billingChain !== 'klarna' && !o.sectionId && !o.parentId)
+    const yearlyAll = allSorted.filter(o => o.frequency === 'yearly' && o.billingChain !== 'klarna' && !o.sectionId && !o.parentId)
+    const onceAll = allSorted.filter(o => o.frequency === 'once' && o.billingChain !== 'klarna' && !o.sectionId && !o.parentId)
     const allCustom = customSections.map(s => renderGroup(s.name, allSorted.filter(o => o.sectionId === s.id))).join('')
 
     // Compute totals from all active (not filtered by UI search/status/type)
     const totalPayable = allSorted.reduce((sum, o) => {
+      if (isKlarnaCompleted(o)) return sum
       if (carryDestMap.has(o.id)) return sum
       const rec = getMonthRecord(o.id, year, month)
       if (o.frequency === 'yearly') {
         if (isYearlyCovered(o)) return sum
         if (o.yearlyMonth != null && o.yearlyMonth !== month) return sum
       }
-      const base = o.amount ?? 0
+      const base = effectiveAmount(o, year, month) ?? 0
       if (rec?.isCarriedOver) {
         const cp = rec.carriedPaid ? 0 : (rec.carriedAmount ?? 0)
         const cur = rec.status === 'paid' ? 0 : base
@@ -1416,14 +1473,13 @@ export function ObligationsTab({
       }
       if (rec?.status === 'paid') return sum
       if (rec && rec.status === 'unknown') return sum
-      const isMonthlyObl = !o.frequency || o.frequency === 'monthly'
-      if (!rec && !isMonthlyObl) return sum
+      if (!rec && o.frequency === 'yearly') return sum
       return sum + base
     }, 0)
 
     const totalPaidAmt = allSorted.reduce((sum, o) => {
       const rec = getMonthRecord(o.id, year, month)
-      const base = o.amount ?? 0
+      const base = effectiveAmount(o, year, month) ?? 0
       if (rec?.isCarriedOver) {
         return sum + (rec.carriedPaid ? (rec.carriedAmount ?? 0) : 0) + (rec.status === 'paid' ? base : 0)
       }
@@ -1437,6 +1493,7 @@ export function ObligationsTab({
     }).length
 
     const pendingCountAll = allSorted.filter(o => {
+      if (isKlarnaCompleted(o)) return false
       if (carryDestMap.has(o.id)) return false
       if (o.frequency === 'yearly') {
         if (isYearlyCovered(o)) return false
@@ -1445,8 +1502,7 @@ export function ObligationsTab({
       const rec = getMonthRecord(o.id, year, month)
       if (rec?.status === 'paid') return false
       if (rec && rec.status === 'unknown') return false
-      const isMonthlyObl = !o.frequency || o.frequency === 'monthly'
-      if (!rec && !isMonthlyObl) return false
+      if (!rec && o.frequency === 'yearly') return false
       return true
     }).length
 
@@ -1486,13 +1542,16 @@ export function ObligationsTab({
     </div>
   </div>
   ${renderGroup('Ежемесячные', monthlyAll)}
+  ${renderGroup('Klarna', klarnaAll)}
   ${renderGroup('Ежегодные', yearlyAll)}
   ${renderGroup('Единоразовые', onceAll)}
   ${allCustom}
 </body>
 </html>`
 
-    await window.api.exportPdf(html, `Обязательства_${year}_${String(month).padStart(2, '0')}.pdf`)
+    const _d = new Date()
+    const stamp = `${String(_d.getDate()).padStart(2, '0')}.${String(_d.getMonth() + 1).padStart(2, '0')}.${String(_d.getFullYear()).slice(-2)}`
+    await window.api.exportPdf(html, `maulwurf обязательства ${stamp}.pdf`)
   }, [active, customSections, getMonthRecord, year, month, currentMonthLabel, carryDestMap, isYearlyCovered, isKlarnaCompleted])
 
   return (
@@ -1712,7 +1771,7 @@ export function ObligationsTab({
                 {monthlyObligations.length}
               </span>
               <span className="text-xs text-neutral-500">
-                {monthlyObligations.reduce((s, o) => s + (o.amount ?? 0), 0).toFixed(2)}€
+                {monthlyObligations.reduce((s, o) => s + (effectiveAmount(o, year, month) ?? 0), 0).toFixed(2)}€
               </span>
             </div>
             <ChevronDown className={`h-4 w-4 text-neutral-500 transition-transform ${collapsedMonthly ? '-rotate-90' : ''}`} />
@@ -1747,7 +1806,7 @@ export function ObligationsTab({
                                 {klarnaMonthly.length}
                               </span>
                               <span className="text-xs text-pink-400/60">
-                                {klarnaMonthly.filter(o => !isKlarnaCompleted(o)).reduce((s, o) => s + (o.amount ?? 0), 0).toFixed(2)}€/мес
+                                {klarnaMonthly.filter(o => !isKlarnaCompleted(o)).reduce((s, o) => s + (effectiveAmount(o, year, month) ?? 0), 0).toFixed(2)}€/мес
                               </span>
                             </div>
                             <div className="flex items-center gap-1">
@@ -1872,7 +1931,7 @@ export function ObligationsTab({
                 {onceObligations.length}
               </span>
               <span className="text-xs text-neutral-500">
-                {onceObligations.reduce((s, o) => s + (o.amount ?? 0), 0).toFixed(2)}€
+                {onceObligations.reduce((s, o) => s + (effectiveAmount(o, year, month) ?? 0), 0).toFixed(2)}€
               </span>
             </div>
             <ChevronDown className={`h-4 w-4 text-neutral-500 transition-transform ${collapsedOnce ? '-rotate-90' : ''}`} />
@@ -1907,7 +1966,7 @@ export function ObligationsTab({
         {/* Custom sections */}
         {customSections.map((section) => {
           const sectionObs = sectionObligations.get(section.id) ?? []
-          const sectionTotal = sectionObs.reduce((s, o) => s + (o.amount ?? 0), 0)
+          const sectionTotal = sectionObs.reduce((s, o) => s + (effectiveAmount(o, year, month) ?? 0), 0)
           const isCollapsed = collapsedSections.has(section.id)
           const isRenaming = renamingSectionId === section.id
 
@@ -2237,6 +2296,7 @@ export function ObligationsTab({
         onClose={() => setModalOpen(false)}
         onSave={handleSave}
         editObligation={editTarget}
+        editEffectiveAmount={editTarget ? effectiveAmount(editTarget, year, month) : undefined}
         preselectedType={preselectedType}
         preselectedFrequency={preselectedFrequency}
         klarnaPaidCount={editTarget ? klarnaPaidCountMap.get(editTarget.id) : undefined}

@@ -4,6 +4,8 @@ import {
   SnapshotWarning,
   UpcomingPayment,
   DataConfidence,
+  Obligation,
+  ObligationStatus,
 } from '../types'
 
 const STALE_DAYS = 14
@@ -24,6 +26,23 @@ export function formatLocalDate(d: Date): string {
   const m = String(d.getMonth() + 1).padStart(2, '0')
   const day = String(d.getDate()).padStart(2, '0')
   return `${y}-${m}-${day}`
+}
+
+// Эффективная цена обязательства для конкретного месяца с учётом истории изменений (amountChanges).
+// Месяцы до самой ранней записи используют базовый amount. Прошлое не затрагивается изменением цены.
+export function effectiveAmount(
+  o: { amount: number | null; amountChanges?: { from: string; amount: number }[] },
+  year: number,
+  month: number
+): number | null {
+  if (!o.amountChanges || o.amountChanges.length === 0) return o.amount
+  const key = `${year}-${String(month).padStart(2, '0')}`
+  let amt = o.amount
+  for (const ch of [...o.amountChanges].sort((a, b) => a.from.localeCompare(b.from))) {
+    if (ch.from <= key) amt = ch.amount
+    else break
+  }
+  return amt
 }
 
 export function computeSnapshot(data: AppDataExtended): FinancialSnapshot {
@@ -68,25 +87,50 @@ export function computeSnapshot(data: AppDataExtended): FinancialSnapshot {
 
   const yr0 = today.getFullYear()
   const mo0 = today.getMonth() + 1
-  const activeObligations = data.obligations.filter(
-    (o) => o.isActive && o.billingChain !== 'klarna'
-  )
-  // Only count obligations with known status (paid/unpaid) — skip 'unknown'
-  const knownObligations = activeObligations.filter((o) => {
+
+  // Эффективный статус обязательства за ТЕКУЩИЙ месяц — единый с UI (BUG-021).
+  // Запись > дефолт. Дефолт без записи: yearly → 'unknown' (неизвестно, предстоит ли
+  // оплата в этом месяце); monthly/once → 'unpaid' (активная подписка/платёж, ещё не
+  // подтверждён). Согласование движка со страницей обязательств: раньше движок считал
+  // любое monthly без записи как 'unknown' и НЕ вычитал его из freeThisMonth, а страница
+  // показывала его как «Не оплачено» в «Осталось оплатить» → два разных числа.
+  const statusThisMonth = (o: Obligation): ObligationStatus => {
     const rec = data.obligationMonths.find(
       (m) => m.obligationId === o.id && m.year === yr0 && m.month === mo0
     )
-    const status = rec?.status ?? 'unknown'
-    return status !== 'unknown'
+    if (rec?.status) return rec.status
+    return (o.frequency ?? 'monthly') === 'yearly' ? 'unknown' : 'unpaid'
+  }
+
+  // Завершённая рассрочка Klarna (оплачено >= всего платежей) — больше не ежемесячное
+  // обязательство и не должна вычитаться из «свободных денег» каждый месяц (BUG-014/BUG-022).
+  const isKlarnaCompleted = (o: Obligation): boolean => {
+    if (o.totalInstallments == null) return false
+    const paid = data.obligationMonths.filter(
+      (m) => m.obligationId === o.id && m.status === 'paid'
+    ).length
+    return paid >= o.totalInstallments
+  }
+
+  const activeObligations = data.obligations.filter(
+    (o) => o.isActive && o.billingChain !== 'klarna'
+  )
+  // Считаем обязательства с реальным статусом (paid/unpaid). 'unknown' (yearly без записи)
+  // и 'skipped' (скрыто в этом месяце) в месячное обязательство НЕ идут.
+  const knownObligations = activeObligations.filter((o) => {
+    const status = statusThisMonth(o)
+    return status === 'paid' || status === 'unpaid'
   })
   const monthlyObligations = knownObligations.reduce(
-    (s, o) => s + (o.amount ?? 0),
+    (s, o) => s + (effectiveAmount(o, yr0, mo0) ?? 0),
     0
   )
 
   // Klarna-обязательства теперь живут как обычные Obligation с billingChain='klarna'
   const klarnaObligations = data.obligations.filter((o) => {
     if (!o.isActive || o.billingChain !== 'klarna') return false
+    // Завершённая рассрочка не входит в месячную Klarna-сумму.
+    if (isKlarnaCompleted(o)) return false
     // Единоразовая (once) Klarna — не ежемесячная: учитываем её ТОЛЬКО в её собственном
     // месяце и только пока не оплачена. Иначе будущий/прошлый разовый платёж постоянно
     // вычитался бы из «свободных денег» в каждом месяце.
@@ -98,7 +142,7 @@ export function computeSnapshot(data: AppDataExtended): FinancialSnapshot {
     }
     return true
   })
-  const monthlyKlarna = klarnaObligations.reduce((s, o) => s + (o.amount ?? 0), 0)
+  const monthlyKlarna = klarnaObligations.reduce((s, o) => s + (effectiveAmount(o, yr0, mo0) ?? 0), 0)
   const freeThisMonth = totalLiquid - monthlyObligations - monthlyKlarna
 
   if (freeThisMonth < 0)
@@ -121,7 +165,7 @@ export function computeSnapshot(data: AppDataExtended): FinancialSnapshot {
       return {
         id: o.id,
         name: o.name,
-        amount: o.amount ?? 0,
+        amount: effectiveAmount(o, yr0, mo0) ?? 0,
         dueDate: formatLocalDate(due),
         source: 'obligation' as const,
         billingChain: o.billingChain,
@@ -138,7 +182,7 @@ export function computeSnapshot(data: AppDataExtended): FinancialSnapshot {
       return {
         id: o.id,
         name: o.name,
-        amount: o.amount ?? 0,
+        amount: effectiveAmount(o, yr0, mo0) ?? 0,
         dueDate: formatLocalDate(due),
         source: 'klarna' as const,
         billingChain: 'klarna',

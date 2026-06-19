@@ -50,6 +50,7 @@ export function Home(): React.JSX.Element {
     getObligationMonth,
     carryObligationDebt,
     setCarriedPaid,
+    returnCarriedObligation,
     clearAllTransactions,
     addImportRecord,
     deleteTransactionBatch,
@@ -288,6 +289,7 @@ export function Home(): React.JSX.Element {
                 onRenameSection={renameCustomSection}
                 onCarryDebt={carryObligationDebt}
                 onSetCarriedPaid={setCarriedPaid}
+                onReturnCarried={returnCarriedObligation}
               />
             </motion.div>
           )}

@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Pencil, Trash2, AlertTriangle, Clock, Copy, ChevronLeft, ChevronRight, CalendarCheck, Link2, Unlink, ChevronsRight } from 'lucide-react'
+import { Pencil, Trash2, AlertTriangle, Clock, Copy, ChevronLeft, ChevronRight, CalendarCheck, Link2, Unlink, ChevronsRight, ChevronsLeft } from 'lucide-react'
 import type { Obligation, ObligationMonth, ObligationStatus } from '../types'
 
 const GENITIVE_MONTHS = [
@@ -64,6 +64,8 @@ interface ObligationCardProps {
   carriedToMonth?: number
   onPayCarried?: () => void
   onPayAll?: () => void
+  onReturnCarried?: () => void
+  effectiveAmt?: number | null // эффективная цена для просматриваемого месяца (с учётом amountChanges)
 }
 
 export function ObligationCard({
@@ -86,6 +88,8 @@ export function ObligationCard({
   carriedToMonth,
   onPayCarried,
   onPayAll,
+  onReturnCarried,
+  effectiveAmt,
 }: ObligationCardProps): React.JSX.Element {
   const [showMonthPicker, setShowMonthPicker] = useState(false)
   const [pickerYear, setPickerYear] = useState(new Date().getFullYear())
@@ -95,15 +99,20 @@ export function ObligationCard({
   const isYearlyCovered = obligation.frequency === 'yearly' && !!yearlyPaidUntil
   // Monthly obligations default to 'unpaid' when no record exists — they're active subscriptions
   // that haven't been confirmed as paid yet. Only yearly/once use 'unknown' as default.
-  const isMonthly = !obligation.frequency || obligation.frequency === 'monthly'
+  // Дефолт без записи: yearly → 'unknown' (неизвестно, предстоит ли оплата в этом месяце);
+  // monthly и once → 'unpaid'. Once показывается ТОЛЬКО в своём месяце создания, где платёж
+  // реально предстоит, поэтому 'unpaid' (а не 'unknown') — устраняет ложное «Неизвестно».
+  const defaultStatus: ObligationStatus = obligation.frequency === 'yearly' ? 'unknown' : 'unpaid'
   const status: ObligationStatus = isYearlyCovered
     ? 'paid'
-    : (currentMonthRecord?.status ?? (carriedFrom ? 'unpaid' : isMonthly ? 'unpaid' : 'unknown'))
+    : (currentMonthRecord?.status ?? (carriedFrom ? 'unpaid' : defaultStatus))
   const cfg = statusConfig[status]
 
   const hasCarryover = carriedFrom && carriedFrom.months > 0
   const carryoverResolved = hasCarryover && !!carriedFrom.resolved
-  const currentAmount = obligation.amount ?? 0
+  // Эффективная цена для просматриваемого месяца (amountChanges); fallback на базовый amount.
+  const displayAmount = effectiveAmt !== undefined ? effectiveAmt : obligation.amount
+  const currentAmount = displayAmount ?? 0
   const carryDebt = hasCarryover ? carriedFrom.totalDebt : 0
   const combinedTotal = currentAmount + carryDebt
 
@@ -242,7 +251,7 @@ export function ObligationCard({
 
           {/* Amount section — larger display */}
           <div className="pt-1">
-            {obligation.amount !== null ? (
+            {displayAmount !== null ? (
               hasCombinedDebt ? (
                 // Новая система: объединённый долг (перенос + текущая подписка, ещё не оплачено)
                 <div className="space-y-1">
@@ -448,6 +457,15 @@ export function ObligationCard({
               className="rounded-md p-1.5 text-neutral-500 hover:bg-orange-950 hover:text-orange-400"
             >
               <Unlink className="h-3.5 w-3.5" />
+            </button>
+          )}
+          {rec?.isCarriedOver && onReturnCarried && (
+            <button
+              onClick={onReturnCarried}
+              title={rec.carriedFromMonth != null ? `Вернуть в ${NOM_MONTHS[rec.carriedFromMonth]}` : 'Вернуть в исходный месяц'}
+              className="rounded-md p-1.5 text-amber-600/70 hover:bg-amber-950 hover:text-amber-400"
+            >
+              <ChevronsLeft className="h-3.5 w-3.5" />
             </button>
           )}
           {onCarryDebt && (() => {

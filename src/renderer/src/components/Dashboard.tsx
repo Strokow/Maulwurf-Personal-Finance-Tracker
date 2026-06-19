@@ -643,7 +643,9 @@ export function Dashboard({
     }
     ln(``)
 
-    const filename = `Транзакции_${range.from}_${range.to}.md`
+    const d = new Date()
+    const stamp = `${String(d.getDate()).padStart(2, '0')}.${String(d.getMonth() + 1).padStart(2, '0')}.${String(d.getFullYear()).slice(-2)}`
+    const filename = `maulwurf транзакции ${stamp}.md`
     await window.api.exportMd(lines.join('\n'), filename)
   }, [transactions, range])
 
@@ -712,7 +714,9 @@ export function Dashboard({
   </table>
 </body>
 </html>`
-    const filename = `Транзакции_${range.from}_${range.to}.pdf`
+    const d = new Date()
+    const stamp = `${String(d.getDate()).padStart(2, '0')}.${String(d.getMonth() + 1).padStart(2, '0')}.${String(d.getFullYear()).slice(-2)}`
+    const filename = `maulwurf транзакции ${stamp}.pdf`
     await window.api.exportPdf(html, filename)
   }, [transactions, range])
 
