@@ -59,13 +59,19 @@ interface ObligationCardProps {
   childCount?: number
   onUnlink?: (obligationId: string) => void
   klarnaPaidCount?: number
-  onCarryDebt?: () => void
+  onCarryDebt?: (toYear: number, toMonth: number) => void
   carriedToYear?: number
   carriedToMonth?: number
   onPayCarried?: () => void
   onPayAll?: () => void
   onReturnCarried?: () => void
   effectiveAmt?: number | null // эффективная цена для просматриваемого месяца (с учётом amountChanges)
+  navYear?: number  // просматриваемый месяц — для ограничения пикера переноса «только вперёд»
+  navMonth?: number
+  // Обязательство «нативно» присутствует в этом месяце (monthly всегда; once — только в месяце
+  // создания; yearly — всегда). false → карточка показана ТОЛЬКО из-за переноса долга сюда,
+  // «текущий» платёж месяца не начисляется (баг №1/№2: перенос once/yearly).
+  occursNatively?: boolean
 }
 
 export function ObligationCard({
@@ -90,9 +96,14 @@ export function ObligationCard({
   onPayAll,
   onReturnCarried,
   effectiveAmt,
+  navYear,
+  navMonth,
+  occursNatively,
 }: ObligationCardProps): React.JSX.Element {
   const [showMonthPicker, setShowMonthPicker] = useState(false)
   const [pickerYear, setPickerYear] = useState(new Date().getFullYear())
+  const [showCarryPicker, setShowCarryPicker] = useState(false)
+  const [carryPickerYear, setCarryPickerYear] = useState(navYear ?? new Date().getFullYear())
   const [exitDir, setExitDir] = useState<'up' | 'down' | null>(null)
 
   // For yearly obligations with paid coverage, show as "paid" even without month record
@@ -110,9 +121,14 @@ export function ObligationCard({
 
   const hasCarryover = carriedFrom && carriedFrom.months > 0
   const carryoverResolved = hasCarryover && !!carriedFrom.resolved
+  // Обязательство «нативно» присутствует в этом месяце. false → карточка показана только
+  // из-за переноса долга сюда (once/yearly в целевом месяце) → текущий платёж не начисляется.
+  const nativeCharge = occursNatively !== false
+  // Карточка-ИСТОЧНИК: долг перенесён ИЗ этого месяца в другой → приглушаем (баг №3).
+  const transferredOut = carriedToYear != null && carriedToMonth != null
   // Эффективная цена для просматриваемого месяца (amountChanges); fallback на базовый amount.
   const displayAmount = effectiveAmt !== undefined ? effectiveAmt : obligation.amount
-  const currentAmount = displayAmount ?? 0
+  const currentAmount = nativeCharge ? (displayAmount ?? 0) : 0
   const carryDebt = hasCarryover ? carriedFrom.totalDebt : 0
   const combinedTotal = currentAmount + carryDebt
 
@@ -170,7 +186,7 @@ export function ObligationCard({
         scale: exitDir ? 0.97 : 1,
       }}
       transition={{ duration: exitDir ? 0.25 : 0.3, ease: [0.4, 0, 0.2, 1] }}
-      className={`rounded-xl border bg-neutral-900/50 p-4${
+      className={`rounded-xl border bg-neutral-900/50 p-4${transferredOut ? ' opacity-60' : ''}${
         isNewCarriedOver
           ? ' border-amber-600/70 ring-1 ring-amber-700/40'
           : paidCarryover
@@ -261,13 +277,13 @@ export function ObligationCard({
                     </span>
                     <span className="font-medium text-amber-300">{fmtEur(carriedAmt!)}</span>
                   </div>
-                  {!currentIsPaid && (
+                  {nativeCharge && !currentIsPaid && (
                     <div className="flex items-center justify-between text-sm">
                       <span className="text-neutral-400">Подписка {NOM_MONTHS[rec?.month ?? 0]}:</span>
                       <span className="font-medium text-neutral-200">{fmtEur(currentAmount)}</span>
                     </div>
                   )}
-                  {!currentIsPaid && (
+                  {nativeCharge && !currentIsPaid && (
                     <div className="border-t border-amber-800/30 pt-1 mt-0.5">
                       <p className="text-lg font-bold text-amber-300">
                         Итого: {fmtEur(currentAmount + carriedAmt!)}
@@ -365,7 +381,7 @@ export function ObligationCard({
                     Оплатить всё ({fmtEur(currentAmount + carriedAmt!)})
                   </button>
                 )}
-                {!carriedIsPaid && onPayCarried && (
+                {nativeCharge && !carriedIsPaid && onPayCarried && (
                   <button
                     onClick={onPayCarried}
                     className="rounded-md bg-neutral-800 border border-neutral-700 px-2.5 py-1 text-xs font-medium text-neutral-300 hover:bg-neutral-700 transition-colors"
@@ -473,13 +489,13 @@ export function ObligationCard({
             const noAmount = obligation.amount == null && rec?.actualAmount == null
             return (
               <button
-                onClick={noAmount ? undefined : onCarryDebt}
+                onClick={noAmount ? undefined : () => { setShowCarryPicker((v) => !v); setShowMonthPicker(false) }}
                 disabled={noAmount}
-                title={noAmount ? 'Укажите сумму обязательства, чтобы перенести долг' : 'Перенести долг на следующий месяц'}
+                title={noAmount ? 'Укажите сумму обязательства, чтобы перенести долг' : 'Перенести на выбранный месяц'}
                 className={
                   noAmount
                     ? 'rounded-md p-1.5 text-neutral-700 cursor-not-allowed'
-                    : 'rounded-md p-1.5 text-amber-600/70 hover:bg-amber-950 hover:text-amber-400'
+                    : `rounded-md p-1.5 text-amber-600/70 hover:bg-amber-950 hover:text-amber-400${showCarryPicker ? ' bg-amber-950 text-amber-400' : ''}`
                 }
               >
                 <ChevronsRight className="h-3.5 w-3.5" />
@@ -547,6 +563,64 @@ export function ObligationCard({
                     {MONTH_NAMES[m]}
                   </button>
                 ))}
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Пикер переноса долга на выбранный месяц (только вперёд) — баг №1/№2 */}
+      <AnimatePresence>
+        {showCarryPicker && onCarryDebt && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            exit={{ opacity: 0, height: 0 }}
+            className="mt-3 overflow-hidden"
+          >
+            <div className="rounded-lg border border-amber-700/50 bg-amber-950/20 p-3">
+              <p className="mb-2 text-xs font-medium text-amber-300">Перенести на месяц</p>
+              <div className="mb-2 flex items-center justify-between">
+                <button
+                  onClick={() => setCarryPickerYear(carryPickerYear - 1)}
+                  className="rounded p-1 text-amber-400/70 hover:bg-amber-900/40 hover:text-amber-300"
+                >
+                  <ChevronLeft className="h-3.5 w-3.5" />
+                </button>
+                <span className="text-xs font-medium text-amber-300">{carryPickerYear}</span>
+                <button
+                  onClick={() => setCarryPickerYear(carryPickerYear + 1)}
+                  className="rounded p-1 text-amber-400/70 hover:bg-amber-900/40 hover:text-amber-300"
+                >
+                  <ChevronRight className="h-3.5 w-3.5" />
+                </button>
+              </div>
+              <div className="grid grid-cols-4 gap-1">
+                {(() => {
+                  const nY = navYear ?? new Date().getFullYear()
+                  const nM = navMonth ?? new Date().getMonth() + 1
+                  const navYM = nY * 12 + nM
+                  return Array.from({ length: 12 }, (_, i) => i + 1).map((m) => {
+                    const disabled = carryPickerYear * 12 + m <= navYM // только будущие месяцы
+                    return (
+                      <button
+                        key={m}
+                        disabled={disabled}
+                        onClick={() => {
+                          onCarryDebt(carryPickerYear, m)
+                          setShowCarryPicker(false)
+                        }}
+                        className={
+                          disabled
+                            ? 'rounded px-2 py-1 text-xs text-neutral-700 cursor-not-allowed'
+                            : 'rounded px-2 py-1 text-xs text-amber-200 hover:bg-amber-900/50 hover:text-amber-100 transition-colors'
+                        }
+                      >
+                        {MONTH_NAMES[m]}
+                      </button>
+                    )
+                  })
+                })()}
               </div>
             </div>
           </motion.div>

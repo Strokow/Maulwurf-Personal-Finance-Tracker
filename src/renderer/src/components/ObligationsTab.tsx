@@ -177,19 +177,34 @@ export function ObligationsTab({
     return nextMonth <= new Date(now.getFullYear(), now.getMonth() + 3, 1)
   }, [year, month])
 
-  const active = obligations.filter((o) => {
+  // «Нативно» активно в заданном месяце: isActive + месяц >= createdAt (once — только
+  // в месяце создания). Единый предикат: используется и для базового active, и как гейт
+  // «начислять ли текущий платёж месяца» (nativeThisMonth) в подсчётах.
+  const isNativeActive = useCallback((o: Obligation, y: number, m: number): boolean => {
     if (!o.isActive) return false
     const created = new Date(o.createdAt)
     const createdYear = created.getFullYear()
     const createdMonth = created.getMonth() + 1
-    // Don't show obligation in months before it was created
-    if (year < createdYear || (year === createdYear && month < createdMonth)) return false
-    // Once obligations only appear in the month they were created
-    if (o.frequency === 'once') {
-      return createdYear === year && createdMonth === month
-    }
+    if (y < createdYear || (y === createdYear && m < createdMonth)) return false
+    if (o.frequency === 'once') return createdYear === y && createdMonth === m
     return true
-  })
+  }, [])
+
+  // Обязательства, ПЕРЕНЕСЁННЫЕ В этот месяц (есть isCarriedOver-запись за nav-месяц).
+  // Нужно, чтобы once/yearly (которые фильтр active не показывает вне их месяца) всё равно
+  // отображались в целевом месяце переноса и участвовали в подсчётах (баг №1/№2).
+  const carriedInIds = useMemo(() => {
+    const ids = new Set<string>()
+    for (const m of obligationMonths) {
+      if (m.isCarriedOver && m.year === year && m.month === month) ids.add(m.obligationId)
+    }
+    return ids
+  }, [obligationMonths, year, month])
+
+  const active = useMemo(
+    () => obligations.filter((o) => isNativeActive(o, year, month) || (o.isActive && carriedInIds.has(o.id))),
+    [obligations, year, month, isNativeActive, carriedInIds]
+  )
 
   // For yearly obligations: find the month they were last paid and compute "paid until" date.
   // If paid in month M of year Y → covered until month M of year Y+1 (exclusive).
@@ -374,10 +389,13 @@ export function ObligationsTab({
 
       const base = effectiveAmount(o, year, month) ?? 0
 
-      // Новая система isCarriedOver: считаем каждую часть отдельно
+      // Новая система isCarriedOver: считаем каждую часть отдельно.
+      // Текущий платёж месяца начисляем только если обязательство нативно в этом месяце —
+      // у перенесённых сюда once/yearly текущего начисления нет, только сам долг (баг №1/№2).
       if (rec?.isCarriedOver) {
         const carriedPart = rec.carriedPaid ? 0 : (rec.carriedAmount ?? 0)
-        const currentPart = rec.status === 'paid' ? 0 : base
+        const nativeHere = isNativeActive(o, year, month)
+        const currentPart = (nativeHere && rec.status !== 'paid') ? base : 0
         const total = carriedPart + currentPart
         return total > 0 ? sum + total : sum
       }
@@ -390,7 +408,7 @@ export function ObligationsTab({
 
       return sum + base
     }, 0)
-  }, [filtered, isYearlyCovered, getMonthRecord, year, month, getEffectiveStatus, carryDestMap, isKlarnaCompleted])
+  }, [filtered, isYearlyCovered, getMonthRecord, year, month, getEffectiveStatus, carryDestMap, isKlarnaCompleted, isNativeActive])
 
   const totalPaidFiltered = useMemo(() => {
     return filtered.reduce((sum, o) => {
@@ -398,17 +416,19 @@ export function ObligationsTab({
       const base = effectiveAmount(o, year, month) ?? 0
 
       if (rec?.isCarriedOver) {
+        const nativeHere = isNativeActive(o, year, month)
         const carriedPart = rec.carriedPaid ? (rec.carriedAmount ?? 0) : 0
-        const currentPart = rec.status === 'paid' ? base : 0
+        const currentPart = (nativeHere && rec.status === 'paid') ? base : 0
         return sum + carriedPart + currentPart
       }
 
       if (rec?.status === 'paid') return sum + base
       return sum
     }, 0)
-  }, [filtered, getMonthRecord, year, month])
+  }, [filtered, getMonthRecord, year, month, isNativeActive])
 
-  const yearlyTotal = yearlyObligations.reduce((s, o) => s + (effectiveAmount(o, year, month) ?? 0), 0)
+  // Годовой итог — только нативные (перенесённые сюда yearly не дают «текущего» начисления).
+  const yearlyTotal = yearlyObligations.reduce((s, o) => s + (isNativeActive(o, year, month) ? (effectiveAmount(o, year, month) ?? 0) : 0), 0)
 
   const carryoverFiltered = useMemo(() => {
     let total = 0
@@ -438,11 +458,16 @@ export function ObligationsTab({
     if (isKlarnaCompleted(o)) return false
     // Долг перенесён ИЗ этого месяца → больше не "ожидает оплаты" здесь
     if (carryDestMap.has(o.id)) return false
+    const rec = getMonthRecord(o.id, year, month)
+    // Перенесённый СЮДА долг: ожидает, пока не погашен; текущий платёж — только если нативно.
+    if (rec?.isCarriedOver) {
+      const nativeHere = isNativeActive(o, year, month)
+      return !rec.carriedPaid || (nativeHere && rec.status !== 'paid')
+    }
     if (o.frequency === 'yearly') {
       if (isYearlyCovered(o)) return false           // already covered
       if (o.yearlyMonth != null && o.yearlyMonth !== month) return false
     }
-    const rec = getMonthRecord(o.id, year, month)
     // Paid → not pending
     if (rec?.status === 'paid') return false
     // Explicitly unknown → excluded
@@ -1176,16 +1201,13 @@ export function ObligationsTab({
     const children = childrenMap.get(o.id) ?? []
     const isParent = children.length > 0
 
-    // Кнопка переноса долга: только monthly. У once/yearly перенос терял сумму —
-    // once не рендерится в целевом месяце (фильтр active), а из месяца-источника
-    // исключается через carryDestMap → долг исчезал из всех итогов (BUG-022, BUG-018).
-    // Всегда переносит в следующий nav-месяц.
-    const getCarryHandler = (ob: Obligation): (() => void) | undefined => {
-      if ((ob.frequency ?? 'monthly') !== 'monthly') return undefined
-      if (carryDestMap.has(ob.id)) return undefined // уже перенесено
-      const nextY = month === 12 ? year + 1 : year
-      const nextM = month === 12 ? 1 : month + 1
-      return () => { void onCarryDebt(ob.id, year, month, nextY, nextM) }
+    // Кнопка переноса долга: доступна ЛЮБОМУ типу (баг №1/№2). Целевой месяц выбирается
+    // в пикере на карточке. Once/yearly теперь корректно отображаются в целевом месяце —
+    // они добавлены в `active` через carriedInIds, а «текущий» платёж месяца им не
+    // начисляется (гейт isNativeActive). Отменяет ограничение monthly из BUG-022 п.4.
+    const getCarryHandler = (ob: Obligation): ((toY: number, toM: number) => void) | undefined => {
+      if (carryDestMap.has(ob.id)) return undefined // уже перенесено ИЗ этого месяца
+      return (toY, toM) => { void onCarryDebt(ob.id, year, month, toY, toM) }
     }
 
     const carryDest = carryDestMap.get(o.id)
@@ -1223,6 +1245,9 @@ export function ObligationsTab({
             onPayAll={() => { void handlePayAll(o.id) }}
             onReturnCarried={() => { void handleReturnCarried(o.id) }}
             effectiveAmt={effectiveAmount(o, year, month)}
+            navYear={year}
+            navMonth={month}
+            occursNatively={isNativeActive(o, year, month)}
           />
         </div>
         {children.length > 0 && (
@@ -1266,6 +1291,9 @@ export function ObligationsTab({
                       onPayAll={() => { void handlePayAll(child.id) }}
                       onReturnCarried={() => { void handleReturnCarried(child.id) }}
                       effectiveAmt={effectiveAmount(child, year, month)}
+                      navYear={year}
+                      navMonth={month}
+                      occursNatively={isNativeActive(child, year, month)}
                     />
                   </div>
                 )
@@ -1282,7 +1310,7 @@ export function ObligationsTab({
         )}
       </div>
     )
-  }, [childrenMap, linkDropTarget, childAreaDropTarget, handleDragStart, handleDrag, handleDragEnd, handleCardDragOver, handleCardDragLeave, handleCardDrop, handleChildAreaDragOver, handleChildAreaDragLeave, handleChildAreaDrop, getMonthRecord, year, month, carryoverMap, carryDestMap, yearlyPaidUntilMap, handleEdit, handleDelete, handleStatusToggle, handleCopyToMonth, handleUnlink, klarnaPaidCountMap, onCarryDebt, handlePayCarried, handlePayAll, handleReturnCarried])
+  }, [childrenMap, linkDropTarget, childAreaDropTarget, handleDragStart, handleDrag, handleDragEnd, handleCardDragOver, handleCardDragLeave, handleCardDrop, handleChildAreaDragOver, handleChildAreaDragLeave, handleChildAreaDrop, getMonthRecord, year, month, carryoverMap, carryDestMap, yearlyPaidUntilMap, handleEdit, handleDelete, handleStatusToggle, handleCopyToMonth, handleUnlink, klarnaPaidCountMap, onCarryDebt, handlePayCarried, handlePayAll, handleReturnCarried, isNativeActive])
 
   const handleExportMD = useCallback(async () => {
     const fmtEur = (n: number): string => n.toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })
@@ -1291,22 +1319,46 @@ export function ObligationsTab({
     const freqLabel = (f?: ObligationFrequency): string =>
       f === 'yearly' ? 'Ежегодный' : f === 'once' ? 'Единоразовый' : 'Ежемесячный'
 
+    const GEN_MONTHS = ['', 'января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря']
+    const NOM_MONTHS = ['', 'Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь']
+
     // Export uses ALL active obligations, ignoring current filter/search state
     const allSorted = [...active].sort((a, b) => a.name.localeCompare(b.name))
 
+    // Строки одного обязательства: основная (если нативно в этом месяце) + отдельная строка
+    // перенесённого СЮДА долга (баг №4) + рекурсивно дети под родителем (баг №4: Spotify).
+    const rowsFor = (o: Obligation, isChildRow: boolean): string[] => {
+      const out: string[] = []
+      const rec = getMonthRecord(o.id, year, month)
+      const nativeHere = isNativeActive(o, year, month)
+      const transferredOut = carryDestMap.get(o.id)
+      const name = ((isChildRow ? '↳ ' : '') + o.name).replace(/\|/g, '\\|')
+      const dayStr = o.approximateDay !== null ? `~${o.approximateDay}` : ''
+      const notes = (o.notes ?? '').replace(/\|/g, '\\|').replace(/\n/g, ' ')
+      if (nativeHere) {
+        if (transferredOut) {
+          out.push(`| ${name} | ${freqLabel(o.frequency)} | — | ${dayStr} | → перенесён на ${NOM_MONTHS[transferredOut.toMonth] ?? ''} ${transferredOut.toYear} | ${notes} |`)
+        } else {
+          const st = isYearlyCovered(o)
+            ? 'paid'
+            : (rec?.status ?? (o.frequency === 'yearly' ? 'unknown' : 'unpaid')) as ObligationStatus
+          const ea = effectiveAmount(o, year, month); const amt = ea !== null ? fmtEur(ea) : '—'
+          out.push(`| ${name} | ${freqLabel(o.frequency)} | ${amt} | ${dayStr} | ${statusLabel(st)} | ${notes} |`)
+        }
+      }
+      if (rec?.isCarriedOver && rec.carriedAmount != null && !transferredOut) {
+        const dSt: ObligationStatus = rec.carriedPaid ? 'paid' : 'unpaid'
+        const from = `долг с ${GEN_MONTHS[rec.carriedFromMonth ?? 0] ?? ''} ${rec.carriedFromYear ?? ''}`.trim()
+        out.push(`| ${name} (${from}) | ${freqLabel(o.frequency)} | ${fmtEur(rec.carriedAmount)} | | ${statusLabel(dSt)} | перенесён |`)
+      }
+      for (const child of (childrenMap.get(o.id) ?? [])) out.push(...rowsFor(child, true))
+      return out
+    }
+
     const renderGroupMd = (title: string, items: Obligation[]): string => {
       if (items.length === 0) return ''
-      const rows = items.map(o => {
-        const rec = getMonthRecord(o.id, year, month)
-        const st = isYearlyCovered(o)
-          ? 'paid'
-          : (rec?.status ?? (o.frequency === 'yearly' ? 'unknown' : 'unpaid')) as ObligationStatus
-        const ea = effectiveAmount(o, year, month); const amt = ea !== null ? fmtEur(ea) : '—'
-        const dayStr = o.approximateDay !== null ? `~${o.approximateDay}` : ''
-        const notes = (o.notes ?? '').replace(/\|/g, '\\|').replace(/\n/g, ' ')
-        const name = o.name.replace(/\|/g, '\\|')
-        return `| ${name} | ${freqLabel(o.frequency)} | ${amt} | ${dayStr} | ${statusLabel(st)} | ${notes} |`
-      }).join('\n')
+      const rows = items.flatMap(o => rowsFor(o, false)).join('\n')
+      if (!rows) return ''
       return `\n## ${title} (${items.length})\n\n| Название | Период | Сумма | Дата | Статус | Заметки |\n|---|---|---|---|---|---|\n${rows}\n`
     }
 
@@ -1330,8 +1382,9 @@ export function ObligationsTab({
       }
       const base = effectiveAmount(o, year, month) ?? 0
       if (rec?.isCarriedOver) {
+        const nativeHere = isNativeActive(o, year, month)
         const cp = rec.carriedPaid ? 0 : (rec.carriedAmount ?? 0)
-        const cur = rec.status === 'paid' ? 0 : base
+        const cur = (nativeHere && rec.status !== 'paid') ? base : 0
         const total = cp + cur
         return total > 0 ? sum + total : sum
       }
@@ -1345,7 +1398,8 @@ export function ObligationsTab({
       const rec = getMonthRecord(o.id, year, month)
       const base = effectiveAmount(o, year, month) ?? 0
       if (rec?.isCarriedOver) {
-        return sum + (rec.carriedPaid ? (rec.carriedAmount ?? 0) : 0) + (rec.status === 'paid' ? base : 0)
+        const nativeHere = isNativeActive(o, year, month)
+        return sum + (rec.carriedPaid ? (rec.carriedAmount ?? 0) : 0) + ((nativeHere && rec.status === 'paid') ? base : 0)
       }
       return rec?.status === 'paid' ? sum + base : sum
     }, 0)
@@ -1359,11 +1413,15 @@ export function ObligationsTab({
     const pendingCountAll = allSorted.filter(o => {
       if (isKlarnaCompleted(o)) return false
       if (carryDestMap.has(o.id)) return false
+      const rec = getMonthRecord(o.id, year, month)
+      if (rec?.isCarriedOver) {
+        const nativeHere = isNativeActive(o, year, month)
+        return !rec.carriedPaid || (nativeHere && rec.status !== 'paid')
+      }
       if (o.frequency === 'yearly') {
         if (isYearlyCovered(o)) return false
         if (o.yearlyMonth != null && o.yearlyMonth !== month) return false
       }
-      const rec = getMonthRecord(o.id, year, month)
       if (rec?.status === 'paid') return false
       if (rec && rec.status === 'unknown') return false
       if (!rec && o.frequency === 'yearly') return false
@@ -1395,7 +1453,7 @@ export function ObligationsTab({
   }, [
     active, customSections,
     getMonthRecord, year, month, currentMonthLabel,
-    carryDestMap, isYearlyCovered, isKlarnaCompleted,
+    carryDestMap, isYearlyCovered, isKlarnaCompleted, childrenMap, isNativeActive,
   ])
 
   const handleExportPDF = useCallback(async () => {
@@ -1413,27 +1471,66 @@ export function ObligationsTab({
     const freqLabel = (f?: ObligationFrequency): string =>
       f === 'yearly' ? 'Ежегодный' : f === 'once' ? 'Единоразовый' : 'Ежемесячный'
 
+    const GEN_MONTHS = ['', 'января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря']
+    const NOM_MONTHS = ['', 'Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь']
+    const td = 'padding:8px 12px;border-bottom:1px solid #ddd'
+
     // Export uses ALL active obligations, ignoring current filter/search state
     const allSorted = [...active].sort((a, b) => a.name.localeCompare(b.name))
 
+    // Строки одного обязательства: основная (если нативно) + строка перенесённого СЮДА долга
+    // + рекурсивно дети под родителем (баг №4).
+    const rowsFor = (o: Obligation, isChildRow: boolean): string[] => {
+      const out: string[] = []
+      const rec = getMonthRecord(o.id, year, month)
+      const nativeHere = isNativeActive(o, year, month)
+      const transferredOut = carryDestMap.get(o.id)
+      const name = (isChildRow ? '↳ ' : '') + o.name
+      const dayStr = o.approximateDay !== null ? `~${o.approximateDay} число` : ''
+      if (nativeHere) {
+        if (transferredOut) {
+          out.push(`<tr>
+          <td style="${td}">${name}</td>
+          <td style="${td}">${freqLabel(o.frequency)}</td>
+          <td style="${td}">—</td>
+          <td style="${td}">${dayStr}</td>
+          <td style="${td};color:#b45309">→ перенесён на ${NOM_MONTHS[transferredOut.toMonth] ?? ''} ${transferredOut.toYear}</td>
+          <td style="${td};color:#666">${o.notes ?? ''}</td>
+        </tr>`)
+        } else {
+          const st = isYearlyCovered(o)
+            ? 'paid'
+            : (rec?.status ?? (o.frequency === 'yearly' ? 'unknown' : 'unpaid')) as ObligationStatus
+          const ea = effectiveAmount(o, year, month); const amt = ea !== null ? fmtEur(ea) : '—'
+          out.push(`<tr>
+          <td style="${td}">${name}</td>
+          <td style="${td}">${freqLabel(o.frequency)}</td>
+          <td style="${td}">${amt}</td>
+          <td style="${td}">${dayStr}</td>
+          <td style="${td}">${statusBadge(st)}</td>
+          <td style="${td};color:#666">${o.notes ?? ''}</td>
+        </tr>`)
+        }
+      }
+      if (rec?.isCarriedOver && rec.carriedAmount != null && !transferredOut) {
+        const dSt: ObligationStatus = rec.carriedPaid ? 'paid' : 'unpaid'
+        const from = `долг с ${GEN_MONTHS[rec.carriedFromMonth ?? 0] ?? ''} ${rec.carriedFromYear ?? ''}`.trim()
+        out.push(`<tr>
+          <td style="${td};color:#b45309">${name} <span style="font-size:11px">(${from})</span></td>
+          <td style="${td}">${freqLabel(o.frequency)}</td>
+          <td style="${td}">${fmtEur(rec.carriedAmount)}</td>
+          <td style="${td}"></td>
+          <td style="${td}">${statusBadge(dSt)}</td>
+          <td style="${td};color:#666">перенесён</td>
+        </tr>`)
+      }
+      for (const child of (childrenMap.get(o.id) ?? [])) out.push(...rowsFor(child, true))
+      return out
+    }
+
     const renderGroup = (title: string, items: Obligation[]): string => {
       if (items.length === 0) return ''
-      const rows = items.map(o => {
-        const rec = getMonthRecord(o.id, year, month)
-        const st = isYearlyCovered(o)
-          ? 'paid'
-          : (rec?.status ?? (o.frequency === 'yearly' ? 'unknown' : 'unpaid')) as ObligationStatus
-        const ea = effectiveAmount(o, year, month); const amt = ea !== null ? fmtEur(ea) : '—'
-        const dayStr = o.approximateDay !== null ? `~${o.approximateDay} число` : ''
-        return `<tr>
-          <td style="padding:8px 12px;border-bottom:1px solid #ddd">${o.name}</td>
-          <td style="padding:8px 12px;border-bottom:1px solid #ddd">${freqLabel(o.frequency)}</td>
-          <td style="padding:8px 12px;border-bottom:1px solid #ddd">${amt}</td>
-          <td style="padding:8px 12px;border-bottom:1px solid #ddd">${dayStr}</td>
-          <td style="padding:8px 12px;border-bottom:1px solid #ddd">${statusBadge(st)}</td>
-          <td style="padding:8px 12px;border-bottom:1px solid #ddd;color:#666">${o.notes ?? ''}</td>
-        </tr>`
-      }).join('')
+      const rows = items.flatMap(o => rowsFor(o, false)).join('')
       return `<h2 style="margin:24px 0 8px;color:#111">${title} <span style="color:#666;font-size:14px">(${items.length})</span></h2>
         <table style="width:100%;border-collapse:collapse;font-size:13px">
           <thead><tr style="text-align:left;color:#666;border-bottom:2px solid #bbb">
@@ -1466,8 +1563,9 @@ export function ObligationsTab({
       }
       const base = effectiveAmount(o, year, month) ?? 0
       if (rec?.isCarriedOver) {
+        const nativeHere = isNativeActive(o, year, month)
         const cp = rec.carriedPaid ? 0 : (rec.carriedAmount ?? 0)
-        const cur = rec.status === 'paid' ? 0 : base
+        const cur = (nativeHere && rec.status !== 'paid') ? base : 0
         const total = cp + cur
         return total > 0 ? sum + total : sum
       }
@@ -1481,7 +1579,8 @@ export function ObligationsTab({
       const rec = getMonthRecord(o.id, year, month)
       const base = effectiveAmount(o, year, month) ?? 0
       if (rec?.isCarriedOver) {
-        return sum + (rec.carriedPaid ? (rec.carriedAmount ?? 0) : 0) + (rec.status === 'paid' ? base : 0)
+        const nativeHere = isNativeActive(o, year, month)
+        return sum + (rec.carriedPaid ? (rec.carriedAmount ?? 0) : 0) + ((nativeHere && rec.status === 'paid') ? base : 0)
       }
       return rec?.status === 'paid' ? sum + base : sum
     }, 0)
@@ -1495,11 +1594,15 @@ export function ObligationsTab({
     const pendingCountAll = allSorted.filter(o => {
       if (isKlarnaCompleted(o)) return false
       if (carryDestMap.has(o.id)) return false
+      const rec = getMonthRecord(o.id, year, month)
+      if (rec?.isCarriedOver) {
+        const nativeHere = isNativeActive(o, year, month)
+        return !rec.carriedPaid || (nativeHere && rec.status !== 'paid')
+      }
       if (o.frequency === 'yearly') {
         if (isYearlyCovered(o)) return false
         if (o.yearlyMonth != null && o.yearlyMonth !== month) return false
       }
-      const rec = getMonthRecord(o.id, year, month)
       if (rec?.status === 'paid') return false
       if (rec && rec.status === 'unknown') return false
       if (!rec && o.frequency === 'yearly') return false
@@ -1552,7 +1655,7 @@ export function ObligationsTab({
     const _d = new Date()
     const stamp = `${String(_d.getDate()).padStart(2, '0')}.${String(_d.getMonth() + 1).padStart(2, '0')}.${String(_d.getFullYear()).slice(-2)}`
     await window.api.exportPdf(html, `maulwurf обязательства ${stamp}.pdf`)
-  }, [active, customSections, getMonthRecord, year, month, currentMonthLabel, carryDestMap, isYearlyCovered, isKlarnaCompleted])
+  }, [active, customSections, getMonthRecord, year, month, currentMonthLabel, carryDestMap, isYearlyCovered, isKlarnaCompleted, childrenMap, isNativeActive])
 
   return (
     <div className="space-y-6">
@@ -1806,7 +1909,7 @@ export function ObligationsTab({
                                 {klarnaMonthly.length}
                               </span>
                               <span className="text-xs text-pink-400/60">
-                                {klarnaMonthly.filter(o => !isKlarnaCompleted(o)).reduce((s, o) => s + (effectiveAmount(o, year, month) ?? 0), 0).toFixed(2)}€/мес
+                                {klarnaMonthly.filter(o => !isKlarnaCompleted(o) && isNativeActive(o, year, month)).reduce((s, o) => s + (effectiveAmount(o, year, month) ?? 0), 0).toFixed(2)}€/мес
                               </span>
                             </div>
                             <div className="flex items-center gap-1">
@@ -1931,7 +2034,7 @@ export function ObligationsTab({
                 {onceObligations.length}
               </span>
               <span className="text-xs text-neutral-500">
-                {onceObligations.reduce((s, o) => s + (effectiveAmount(o, year, month) ?? 0), 0).toFixed(2)}€
+                {onceObligations.reduce((s, o) => s + (isNativeActive(o, year, month) ? (effectiveAmount(o, year, month) ?? 0) : 0), 0).toFixed(2)}€
               </span>
             </div>
             <ChevronDown className={`h-4 w-4 text-neutral-500 transition-transform ${collapsedOnce ? '-rotate-90' : ''}`} />
@@ -1966,7 +2069,7 @@ export function ObligationsTab({
         {/* Custom sections */}
         {customSections.map((section) => {
           const sectionObs = sectionObligations.get(section.id) ?? []
-          const sectionTotal = sectionObs.reduce((s, o) => s + (effectiveAmount(o, year, month) ?? 0), 0)
+          const sectionTotal = sectionObs.reduce((s, o) => s + (isNativeActive(o, year, month) ? (effectiveAmount(o, year, month) ?? 0) : 0), 0)
           const isCollapsed = collapsedSections.has(section.id)
           const isRenaming = renamingSectionId === section.id
 
