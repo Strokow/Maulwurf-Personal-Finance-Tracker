@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Pencil, Trash2, AlertTriangle, Clock, Copy, ChevronLeft, ChevronRight, CalendarCheck, Link2, Unlink, ChevronsRight, ChevronsLeft } from 'lucide-react'
 import type { Obligation, ObligationMonth, ObligationStatus } from '../types'
+import { clampDayToMonth } from '../utils/financialEngine'
 
 const GENITIVE_MONTHS = [
   '', 'января', 'февраля', 'марта', 'апреля', 'мая', 'июня',
@@ -152,10 +153,12 @@ export function ObligationCard({
   if (approxDay !== null && status !== 'paid' && obligation.billingChain !== 'klarna') {
     const year = today.getFullYear()
     const month = today.getMonth()
-    let nextDate = new Date(year, month, approxDay)
+    // BUG-010: clamp обязателен — approximateDay 29-31 в коротком месяце иначе
+    // «переливается» в следующий и предупреждение врёт на несколько дней.
+    let nextDate = new Date(year, month, clampDayToMonth(year, month, approxDay))
     nextDate.setHours(0, 0, 0, 0)
     if (nextDate < today) {
-      nextDate = new Date(year, month + 1, approxDay)
+      nextDate = new Date(year, month + 1, clampDayToMonth(year, month + 1, approxDay))
     }
     const diff = Math.round((nextDate.getTime() - today.getTime()) / (1000 * 60 * 60 * 24))
     if (diff >= 0 && diff <= 5) {

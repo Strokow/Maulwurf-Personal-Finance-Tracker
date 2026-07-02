@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import maulwurflogo from '../assets/maulwurflogo.png'
 import { motion, AnimatePresence } from 'framer-motion'
-import { CalendarClock, Plus, ArrowLeft, Bug, X, History } from 'lucide-react'
+import { CalendarClock, Plus, ArrowLeft, Bug, X, History, Settings } from 'lucide-react'
 import type { Period, PeriodRange } from '../types'
 import { useStore } from '../store/useStore'
 import { Dashboard } from '../components/Dashboard'
@@ -12,6 +12,7 @@ import { ObligationsTab } from '../components/ObligationsTab'
 import { ErrorRegistry } from '../components/ErrorRegistry'
 import { ErrorToastContainer } from '../components/ErrorToastContainer'
 import { HistoryModal } from '../components/HistoryModal'
+import { SettingsModal } from '../components/SettingsModal'
 import { installGlobalErrorHandlers, setCurrentPage } from '../services/errorRegistry'
 import { formatLocalDate } from '../utils/financialEngine'
 
@@ -76,6 +77,7 @@ export function Home(): React.JSX.Element {
   const [page, setPage] = useState<Page>('home')
   const [errorDrawerOpen, setErrorDrawerOpen] = useState(false)
   const [historyOpen, setHistoryOpen] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const [splashDone, setSplashDone] = useState(false)
   const [period, setPeriod] = useState<Period>('this_month')
   const [customRange, setCustomRange] = useState<PeriodRange>({
@@ -180,6 +182,14 @@ export function Home(): React.JSX.Element {
               }`}
             >
               Обзор
+            </button>
+            <div className="mx-1 w-px bg-neutral-800" />
+            <button
+              onClick={() => setSettingsOpen(true)}
+              title="Настройки"
+              className="rounded-md px-2.5 py-1.5 text-neutral-400 transition-all duration-200 hover:-translate-y-px hover:bg-neutral-800/50 hover:text-neutral-200 active:translate-y-px"
+            >
+              <Settings className="h-4 w-4" />
             </button>
           </nav>
         </div>
@@ -371,6 +381,19 @@ export function Home(): React.JSX.Element {
             onRestored={async () => {
               await refresh()
               setHistoryOpen(false)
+            }}
+          />
+        )}
+      </AnimatePresence>
+
+      {/* Settings modal */}
+      <AnimatePresence>
+        {settingsOpen && (
+          <SettingsModal
+            onClose={() => setSettingsOpen(false)}
+            onRestored={async () => {
+              await refresh()
+              setSettingsOpen(false)
             }}
           />
         )}

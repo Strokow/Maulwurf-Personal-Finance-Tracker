@@ -5,6 +5,7 @@ import {
   UpcomingPayment,
   DataConfidence,
   Obligation,
+  ObligationMonth,
   ObligationStatus,
 } from '../types'
 
@@ -94,12 +95,45 @@ export function computeSnapshot(data: AppDataExtended): FinancialSnapshot {
   // подтверждён). Согласование движка со страницей обязательств: раньше движок считал
   // любое monthly без записи как 'unknown' и НЕ вычитал его из freeThisMonth, а страница
   // показывала его как «Не оплачено» в «Осталось оплатить» → два разных числа.
-  const statusThisMonth = (o: Obligation): ObligationStatus => {
-    const rec = data.obligationMonths.find(
+  const recThisMonth = (o: Obligation): ObligationMonth | undefined =>
+    data.obligationMonths.find(
       (m) => m.obligationId === o.id && m.year === yr0 && m.month === mo0
     )
+
+  const statusThisMonth = (o: Obligation): ObligationStatus => {
+    const rec = recThisMonth(o)
     if (rec?.status) return rec.status
     return (o.frequency ?? 'monthly') === 'yearly' ? 'unknown' : 'unpaid'
+  }
+
+  // Гейт «нативности» месяца (аудит 2026-07-02): обязательство участвует в текущем
+  // месяце только если месяц >= месяца createdAt; once — ТОЛЬКО в месяце создания.
+  // Без гейта once после своего месяца (дефолт unpaid) вычиталось из freeThisMonth
+  // навсегда (BUG-016 закрывал это только для Klarna-once), а обязательства,
+  // созданные для будущего месяца, — уже сейчас. Единый предикат со страницей
+  // обязательств (isNativeActive в ObligationsTab).
+  const isNativeThisMonth = (o: Obligation): boolean => {
+    const created = new Date(o.createdAt)
+    const cy = created.getFullYear()
+    const cm = created.getMonth() + 1
+    if (yr0 < cy || (yr0 === cy && mo0 < cm)) return false
+    if ((o.frequency ?? 'monthly') === 'once') return cy === yr0 && cm === mo0
+    return true
+  }
+
+  // Перенос долга в дашборде (продолжение BUG-023, решение 2026-07-02):
+  // долг, перенесённый ИЗ текущего месяца, здесь больше не должен;
+  // непогашенный долг, перенесённый СЮДА, — добавляется к обязательствам месяца.
+  const carriedOutIds = new Set(
+    data.obligationMonths
+      .filter((m) => m.isCarriedOver && m.carriedFromYear === yr0 && m.carriedFromMonth === mo0)
+      .map((m) => m.obligationId)
+  )
+  const carriedInDebt = (o: Obligation): number => {
+    const rec = recThisMonth(o)
+    return rec?.isCarriedOver && !rec.carriedPaid && rec.carriedAmount != null
+      ? rec.carriedAmount
+      : 0
   }
 
   // Завершённая рассрочка Klarna (оплачено >= всего платежей) — больше не ежемесячное
@@ -117,32 +151,53 @@ export function computeSnapshot(data: AppDataExtended): FinancialSnapshot {
   )
   // Считаем обязательства с реальным статусом (paid/unpaid). 'unknown' (yearly без записи)
   // и 'skipped' (скрыто в этом месяце) в месячное обязательство НЕ идут.
+  // Дополнительно: только нативные в этом месяце (гейт createdAt/once) и не
+  // перенесённые ИЗ него — их текущее начисление живёт в целевом месяце переноса.
   const knownObligations = activeObligations.filter((o) => {
+    if (!isNativeThisMonth(o) || carriedOutIds.has(o.id)) return false
     const status = statusThisMonth(o)
     return status === 'paid' || status === 'unpaid'
   })
-  const monthlyObligations = knownObligations.reduce(
+  let monthlyObligations = knownObligations.reduce(
     (s, o) => s + (effectiveAmount(o, yr0, mo0) ?? 0),
     0
   )
+  let monthlyObligationsCount = knownObligations.length
+  // Непогашенный долг, перенесённый СЮДА, добавляется отдельной суммой — в т.ч. у
+  // once/yearly, которые вне своего месяца текущего начисления не имеют.
+  for (const o of activeObligations) {
+    const debt = carriedInDebt(o)
+    if (debt > 0) {
+      monthlyObligations += debt
+      if (!knownObligations.some((k) => k.id === o.id)) monthlyObligationsCount++
+    }
+  }
 
   // Klarna-обязательства теперь живут как обычные Obligation с billingChain='klarna'
   const klarnaObligations = data.obligations.filter((o) => {
     if (!o.isActive || o.billingChain !== 'klarna') return false
     // Завершённая рассрочка не входит в месячную Klarna-сумму.
     if (isKlarnaCompleted(o)) return false
+    // Гейт нативности + перенос — как у обычных обязательств.
+    if (!isNativeThisMonth(o) || carriedOutIds.has(o.id)) return false
     // Единоразовая (once) Klarna — не ежемесячная: учитываем её ТОЛЬКО в её собственном
     // месяце и только пока не оплачена. Иначе будущий/прошлый разовый платёж постоянно
     // вычитался бы из «свободных денег» в каждом месяце.
     if ((o.frequency ?? 'monthly') === 'once') {
-      const rec = data.obligationMonths.find(
-        (m) => m.obligationId === o.id && m.year === yr0 && m.month === mo0
-      )
-      return (rec?.status ?? 'unknown') === 'unpaid'
+      return (recThisMonth(o)?.status ?? 'unknown') === 'unpaid'
     }
     return true
   })
-  const monthlyKlarna = klarnaObligations.reduce((s, o) => s + (effectiveAmount(o, yr0, mo0) ?? 0), 0)
+  let monthlyKlarna = klarnaObligations.reduce((s, o) => s + (effectiveAmount(o, yr0, mo0) ?? 0), 0)
+  let monthlyKlarnaCount = klarnaObligations.length
+  for (const o of data.obligations) {
+    if (!o.isActive || o.billingChain !== 'klarna') continue
+    const debt = carriedInDebt(o)
+    if (debt > 0) {
+      monthlyKlarna += debt
+      if (!klarnaObligations.some((k) => k.id === o.id)) monthlyKlarnaCount++
+    }
+  }
   const freeThisMonth = totalLiquid - monthlyObligations - monthlyKlarna
 
   if (freeThisMonth < 0)
@@ -152,7 +207,11 @@ export function computeSnapshot(data: AppDataExtended): FinancialSnapshot {
       severity: 'error',
     })
 
-  const in14 = new Date(today)
+  // Нормализация к 00:00 (аудит 2026-07-02): сравнение due < today с временем суток
+  // «уводило» платёж В ДЕНЬ ОПЛАТЫ на следующий месяц — он пропадал из ближайших.
+  const todayMid = new Date(today)
+  todayMid.setHours(0, 0, 0, 0)
+  const in14 = new Date(todayMid)
   in14.setDate(in14.getDate() + 14)
   const yr = today.getFullYear()
   const mo = today.getMonth()
@@ -161,7 +220,7 @@ export function computeSnapshot(data: AppDataExtended): FinancialSnapshot {
     .filter((o) => o.approximateDay != null)
     .map((o) => {
       let due = new Date(yr, mo, clampDayToMonth(yr, mo, o.approximateDay!))
-      if (due < today) due = new Date(yr, mo + 1, clampDayToMonth(yr, mo + 1, o.approximateDay!))
+      if (due < todayMid) due = new Date(yr, mo + 1, clampDayToMonth(yr, mo + 1, o.approximateDay!))
       return {
         id: o.id,
         name: o.name,
@@ -178,7 +237,7 @@ export function computeSnapshot(data: AppDataExtended): FinancialSnapshot {
     .filter((o) => o.approximateDay != null)
     .map((o) => {
       let due = new Date(yr, mo, clampDayToMonth(yr, mo, o.approximateDay!))
-      if (due < today) due = new Date(yr, mo + 1, clampDayToMonth(yr, mo + 1, o.approximateDay!))
+      if (due < todayMid) due = new Date(yr, mo + 1, clampDayToMonth(yr, mo + 1, o.approximateDay!))
       return {
         id: o.id,
         name: o.name,
@@ -224,9 +283,9 @@ export function computeSnapshot(data: AppDataExtended): FinancialSnapshot {
     totalLiquid,
     totalLiquidConfidence,
     monthlyObligations,
-    monthlyObligationsCount: knownObligations.length,
+    monthlyObligationsCount,
     monthlyKlarna,
-    monthlyKlarnaCount: klarnaObligations.length,
+    monthlyKlarnaCount,
     freeThisMonth,
     riskLevel,
     upcomingPayments,

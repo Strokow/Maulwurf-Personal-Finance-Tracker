@@ -77,6 +77,7 @@ declare global {
       backup: BackupAPI
       exportPdf: (html: string, defaultName: string) => Promise<{ success: boolean; filePath?: string }>
       exportMd: (content: string, defaultName: string) => Promise<{ success: boolean; filePath?: string }>
+      openDevTools: () => Promise<void>
     }
   }
 }

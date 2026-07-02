@@ -227,6 +227,189 @@ describe('computeSnapshot', () => {
       expect(snap.monthlyObligationsCount).toBe(0)
     })
 
+    // Аудит 2026-07-02: гейт «нативности» месяца (createdAt/once) в computeSnapshot.
+    it('once вне своего месяца создания НЕ считается (раньше вычиталось навсегда)', () => {
+      const prev = new Date()
+      prev.setMonth(prev.getMonth() - 2)
+      const obligations = [
+        makeObligation({ id: 'ob-1', amount: 70, frequency: 'once', createdAt: prev.toISOString() }),
+      ]
+      const data = makeAppData({
+        accountBalances: [makeBalance('sparkasse', 1000)],
+        obligations,
+      })
+      const snap = computeSnapshot(data)
+      expect(snap.monthlyObligations).toBe(0)
+      expect(snap.monthlyObligationsCount).toBe(0)
+    })
+
+    it('once в своём месяце создания считается как owed', () => {
+      const obligations = [makeObligation({ id: 'ob-1', amount: 70, frequency: 'once' })]
+      const data = makeAppData({
+        accountBalances: [makeBalance('sparkasse', 1000)],
+        obligations,
+      })
+      const snap = computeSnapshot(data)
+      expect(snap.monthlyObligations).toBe(70)
+    })
+
+    it('обязательство, созданное для БУДУЩЕГО месяца, сейчас не считается', () => {
+      const future = new Date()
+      future.setMonth(future.getMonth() + 2)
+      const obligations = [
+        makeObligation({ id: 'ob-1', amount: 30, frequency: 'monthly', createdAt: future.toISOString() }),
+      ]
+      const data = makeAppData({
+        accountBalances: [makeBalance('sparkasse', 1000)],
+        obligations,
+      })
+      const snap = computeSnapshot(data)
+      expect(snap.monthlyObligations).toBe(0)
+      expect(snap.monthlyObligationsCount).toBe(0)
+    })
+
+    // Аудит 2026-07-02: дашборд учитывает перенос долга (продолжение BUG-023).
+    it('долг, перенесённый ИЗ текущего месяца, исключается из monthlyObligations', () => {
+      const now = new Date()
+      const y = now.getFullYear()
+      const m = now.getMonth() + 1
+      const nextM = m === 12 ? 1 : m + 1
+      const nextY = m === 12 ? y + 1 : y
+      const obligations = [makeObligation({ id: 'ob-1', amount: 40, frequency: 'monthly' })]
+      const data = makeAppData({
+        accountBalances: [makeBalance('sparkasse', 1000)],
+        obligations,
+        obligationMonths: [
+          {
+            obligationId: 'ob-1',
+            year: nextY,
+            month: nextM,
+            status: 'unpaid',
+            actualAmount: null,
+            isCarriedOver: true,
+            carriedFromYear: y,
+            carriedFromMonth: m,
+            carriedAmount: 40,
+          },
+        ],
+      })
+      const snap = computeSnapshot(data)
+      expect(snap.monthlyObligations).toBe(0)
+      expect(snap.monthlyObligationsCount).toBe(0)
+    })
+
+    it('непогашенный долг, перенесённый СЮДА, добавляется к текущему начислению', () => {
+      const now = new Date()
+      const y = now.getFullYear()
+      const m = now.getMonth() + 1
+      const prev = new Date()
+      prev.setMonth(prev.getMonth() - 1)
+      const obligations = [
+        makeObligation({ id: 'ob-1', amount: 40, frequency: 'monthly', createdAt: prev.toISOString() }),
+      ]
+      const data = makeAppData({
+        accountBalances: [makeBalance('sparkasse', 1000)],
+        obligations,
+        obligationMonths: [
+          {
+            obligationId: 'ob-1',
+            year: y,
+            month: m,
+            status: 'unpaid',
+            actualAmount: null,
+            isCarriedOver: true,
+            carriedFromYear: prev.getFullYear(),
+            carriedFromMonth: prev.getMonth() + 1,
+            carriedAmount: 25,
+          },
+        ],
+      })
+      const snap = computeSnapshot(data)
+      // 40 (текущий месяц, unpaid) + 25 (перенесённый долг)
+      expect(snap.monthlyObligations).toBe(65)
+      expect(snap.monthlyObligationsCount).toBe(1)
+    })
+
+    it('погашенный перенесённый долг (carriedPaid) не добавляется', () => {
+      const now = new Date()
+      const y = now.getFullYear()
+      const m = now.getMonth() + 1
+      const prev = new Date()
+      prev.setMonth(prev.getMonth() - 1)
+      const obligations = [
+        makeObligation({ id: 'ob-1', amount: 40, frequency: 'monthly', createdAt: prev.toISOString() }),
+      ]
+      const data = makeAppData({
+        accountBalances: [makeBalance('sparkasse', 1000)],
+        obligations,
+        obligationMonths: [
+          {
+            obligationId: 'ob-1',
+            year: y,
+            month: m,
+            status: 'unpaid',
+            actualAmount: null,
+            isCarriedOver: true,
+            carriedFromYear: prev.getFullYear(),
+            carriedFromMonth: prev.getMonth() + 1,
+            carriedAmount: 25,
+            carriedPaid: true,
+          },
+        ],
+      })
+      const snap = computeSnapshot(data)
+      expect(snap.monthlyObligations).toBe(40)
+    })
+
+    it('перенесённый СЮДА once (не нативный) должен только сам долг', () => {
+      const now = new Date()
+      const y = now.getFullYear()
+      const m = now.getMonth() + 1
+      const prev = new Date()
+      prev.setMonth(prev.getMonth() - 1)
+      const obligations = [
+        makeObligation({ id: 'ob-1', amount: 70, frequency: 'once', createdAt: prev.toISOString() }),
+      ]
+      const data = makeAppData({
+        accountBalances: [makeBalance('sparkasse', 1000)],
+        obligations,
+        obligationMonths: [
+          {
+            obligationId: 'ob-1',
+            year: y,
+            month: m,
+            status: 'unpaid',
+            actualAmount: null,
+            isCarriedOver: true,
+            carriedFromYear: prev.getFullYear(),
+            carriedFromMonth: prev.getMonth() + 1,
+            carriedAmount: 70,
+          },
+        ],
+      })
+      const snap = computeSnapshot(data)
+      // Только carriedAmount, без второго «текущего» начисления
+      expect(snap.monthlyObligations).toBe(70)
+      expect(snap.monthlyObligationsCount).toBe(1)
+    })
+
+    // Аудит 2026-07-02: платёж В ДЕНЬ ОПЛАТЫ должен оставаться в ближайших платежах.
+    it('платёж с approximateDay = сегодня попадает в upcomingPayments', () => {
+      const now = new Date()
+      const obligations = [
+        makeObligation({ id: 'ob-1', amount: 20, frequency: 'monthly', approximateDay: now.getDate() }),
+      ]
+      const data = makeAppData({
+        accountBalances: [makeBalance('sparkasse', 1000)],
+        obligations,
+      })
+      const snap = computeSnapshot(data)
+      const y = now.getFullYear()
+      const mo = String(now.getMonth() + 1).padStart(2, '0')
+      const d = String(now.getDate()).padStart(2, '0')
+      expect(snap.upcomingPayments.some((p) => p.dueDate === `${y}-${mo}-${d}`)).toBe(true)
+    })
+
     it('skipped обязательство исключается из месячной суммы', () => {
       const now = new Date()
       const obligations = [makeObligation({ id: 'ob-1', amount: 50, frequency: 'monthly' })]

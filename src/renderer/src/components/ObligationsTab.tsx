@@ -1230,7 +1230,7 @@ export function ObligationsTab({
             obligation={o}
             currentMonthRecord={getMonthRecord(o.id, year, month)}
             carriedFrom={carryoverMap.get(o.id)}
-            yearlyPaidUntil={yearlyPaidUntilMap.get(o.id)}
+            yearlyPaidUntil={isYearlyCovered(o) ? yearlyPaidUntilMap.get(o.id) : undefined}
             onEdit={handleEdit}
             onDelete={handleDelete}
             onStatusChange={handleStatusToggle}
@@ -1275,7 +1275,7 @@ export function ObligationsTab({
                       obligation={child}
                       currentMonthRecord={getMonthRecord(child.id, year, month)}
                       carriedFrom={carryoverMap.get(child.id)}
-                      yearlyPaidUntil={yearlyPaidUntilMap.get(child.id)}
+                      yearlyPaidUntil={isYearlyCovered(child) ? yearlyPaidUntilMap.get(child.id) : undefined}
                       onEdit={handleEdit}
                       onDelete={handleDelete}
                       onStatusChange={handleStatusToggle}
@@ -1310,7 +1310,7 @@ export function ObligationsTab({
         )}
       </div>
     )
-  }, [childrenMap, linkDropTarget, childAreaDropTarget, handleDragStart, handleDrag, handleDragEnd, handleCardDragOver, handleCardDragLeave, handleCardDrop, handleChildAreaDragOver, handleChildAreaDragLeave, handleChildAreaDrop, getMonthRecord, year, month, carryoverMap, carryDestMap, yearlyPaidUntilMap, handleEdit, handleDelete, handleStatusToggle, handleCopyToMonth, handleUnlink, klarnaPaidCountMap, onCarryDebt, handlePayCarried, handlePayAll, handleReturnCarried, isNativeActive])
+  }, [childrenMap, linkDropTarget, childAreaDropTarget, handleDragStart, handleDrag, handleDragEnd, handleCardDragOver, handleCardDragLeave, handleCardDrop, handleChildAreaDragOver, handleChildAreaDragLeave, handleChildAreaDrop, getMonthRecord, year, month, carryoverMap, carryDestMap, yearlyPaidUntilMap, isYearlyCovered, handleEdit, handleDelete, handleStatusToggle, handleCopyToMonth, handleUnlink, klarnaPaidCountMap, onCarryDebt, handlePayCarried, handlePayAll, handleReturnCarried, isNativeActive])
 
   const handleExportMD = useCallback(async () => {
     const fmtEur = (n: number): string => n.toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })
