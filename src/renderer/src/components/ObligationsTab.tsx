@@ -247,13 +247,6 @@ export function ObligationsTab({
     return currentYM >= paidYM && currentYM <= untilYM
   }, [yearlyPaidUntilMap, year, month])
 
-  // Автоматический carryoverMap отключён — только ручной перенос через кнопку.
-  // Возвращает пустую Map, чтобы карточки не показывали долг без явного переноса.
-  const carryoverMap = useMemo(
-    () => new Map<string, { fromYear: number; fromMonth: number; months: number; totalDebt: number; resolved: boolean }>(),
-    []
-  )
-
   // Для каждого обязательства в текущем nav-месяце: куда был перенесён долг (если был)
   // Ключ = obligationId, значение = {toYear, toMonth} куда создана isCarriedOver-запись
   const carryDestMap = useMemo(() => {
@@ -430,19 +423,6 @@ export function ObligationsTab({
   // Годовой итог — только нативные (перенесённые сюда yearly не дают «текущего» начисления).
   const yearlyTotal = yearlyObligations.reduce((s, o) => s + (isNativeActive(o, year, month) ? (effectiveAmount(o, year, month) ?? 0) : 0), 0)
 
-  const carryoverFiltered = useMemo(() => {
-    let total = 0
-    let count = 0
-    for (const o of filtered) {
-      const info = carryoverMap.get(o.id)
-      if (info && !info.resolved) {
-        total += info.totalDebt
-        count++
-      }
-    }
-    return { total, count }
-  }, [filtered, carryoverMap])
-
   const paidCount = filtered.filter((o) => {
     // BUG-014: completed Klarna (paid >= totalInstallments) исключены из счётчика —
     // их paid-метка за текущий месяц это часть импорт-истории, не реальный платёж пользователя.
@@ -473,7 +453,7 @@ export function ObligationsTab({
     // Explicitly unknown → excluded
     if (rec && rec.status === 'unknown') return false
     // Monthly obligations default to 'unpaid' even without a record
-    if (!rec && o.frequency === 'yearly' && !carryoverMap.has(o.id)) return false
+    if (!rec && o.frequency === 'yearly') return false
     // 'unpaid' or monthly without record or carryover → pending
     return true
   }).length
@@ -856,7 +836,7 @@ export function ObligationsTab({
     await onStatusChange(obligationId, year, month, status, undefined, true)
 
     // When marking as 'paid', also mark any carryover (unpaid) months as paid.
-    // Scan obligationMonths directly to avoid stale closure issues with carryoverMap/getMonthRecord.
+    // Scan obligationMonths directly to avoid stale closure issues with getMonthRecord.
     const carryoverMonthsToPay: Array<{ y: number; m: number; oId: string }> = []
     const collectCarryover = (oId: string): void => {
       const obligation = obligations.find(o => o.id === oId)
@@ -1229,7 +1209,6 @@ export function ObligationsTab({
           <ObligationCard
             obligation={o}
             currentMonthRecord={getMonthRecord(o.id, year, month)}
-            carriedFrom={carryoverMap.get(o.id)}
             yearlyPaidUntil={isYearlyCovered(o) ? yearlyPaidUntilMap.get(o.id) : undefined}
             onEdit={handleEdit}
             onDelete={handleDelete}
@@ -1274,7 +1253,6 @@ export function ObligationsTab({
                     <ObligationCard
                       obligation={child}
                       currentMonthRecord={getMonthRecord(child.id, year, month)}
-                      carriedFrom={carryoverMap.get(child.id)}
                       yearlyPaidUntil={isYearlyCovered(child) ? yearlyPaidUntilMap.get(child.id) : undefined}
                       onEdit={handleEdit}
                       onDelete={handleDelete}
@@ -1310,7 +1288,7 @@ export function ObligationsTab({
         )}
       </div>
     )
-  }, [childrenMap, linkDropTarget, childAreaDropTarget, handleDragStart, handleDrag, handleDragEnd, handleCardDragOver, handleCardDragLeave, handleCardDrop, handleChildAreaDragOver, handleChildAreaDragLeave, handleChildAreaDrop, getMonthRecord, year, month, carryoverMap, carryDestMap, yearlyPaidUntilMap, isYearlyCovered, handleEdit, handleDelete, handleStatusToggle, handleCopyToMonth, handleUnlink, klarnaPaidCountMap, onCarryDebt, handlePayCarried, handlePayAll, handleReturnCarried, isNativeActive])
+  }, [childrenMap, linkDropTarget, childAreaDropTarget, handleDragStart, handleDrag, handleDragEnd, handleCardDragOver, handleCardDragLeave, handleCardDrop, handleChildAreaDragOver, handleChildAreaDragLeave, handleChildAreaDrop, getMonthRecord, year, month, carryDestMap, yearlyPaidUntilMap, isYearlyCovered, handleEdit, handleDelete, handleStatusToggle, handleCopyToMonth, handleUnlink, klarnaPaidCountMap, onCarryDebt, handlePayCarried, handlePayAll, handleReturnCarried, isNativeActive])
 
   const handleExportMD = useCallback(async () => {
     const fmtEur = (n: number): string => n.toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })
@@ -1458,6 +1436,11 @@ export function ObligationsTab({
 
   const handleExportPDF = useCallback(async () => {
     const fmtEur = (n: number): string => n.toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })
+    // Escape user-controlled strings (names, notes, custom section titles) before
+    // they enter the PDF HTML template — the off-screen print window has no CSP
+    // and no preload, so unescaped markup could corrupt/alter the export.
+    const escapeHtml = (s: string): string =>
+      s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;')
     const statusBadge = (s: ObligationStatus): string => {
       const map = {
         paid: { color: '#16a34a', text: 'Оплачено' },
@@ -1485,7 +1468,8 @@ export function ObligationsTab({
       const rec = getMonthRecord(o.id, year, month)
       const nativeHere = isNativeActive(o, year, month)
       const transferredOut = carryDestMap.get(o.id)
-      const name = (isChildRow ? '↳ ' : '') + o.name
+      const name = escapeHtml((isChildRow ? '↳ ' : '') + o.name)
+      const notes = escapeHtml(o.notes ?? '')
       const dayStr = o.approximateDay !== null ? `~${o.approximateDay} число` : ''
       if (nativeHere) {
         if (transferredOut) {
@@ -1495,7 +1479,7 @@ export function ObligationsTab({
           <td style="${td}">—</td>
           <td style="${td}">${dayStr}</td>
           <td style="${td};color:#b45309">→ перенесён на ${NOM_MONTHS[transferredOut.toMonth] ?? ''} ${transferredOut.toYear}</td>
-          <td style="${td};color:#666">${o.notes ?? ''}</td>
+          <td style="${td};color:#666">${notes}</td>
         </tr>`)
         } else {
           const st = isYearlyCovered(o)
@@ -1508,7 +1492,7 @@ export function ObligationsTab({
           <td style="${td}">${amt}</td>
           <td style="${td}">${dayStr}</td>
           <td style="${td}">${statusBadge(st)}</td>
-          <td style="${td};color:#666">${o.notes ?? ''}</td>
+          <td style="${td};color:#666">${notes}</td>
         </tr>`)
         }
       }
@@ -1531,7 +1515,7 @@ export function ObligationsTab({
     const renderGroup = (title: string, items: Obligation[]): string => {
       if (items.length === 0) return ''
       const rows = items.flatMap(o => rowsFor(o, false)).join('')
-      return `<h2 style="margin:24px 0 8px;color:#111">${title} <span style="color:#666;font-size:14px">(${items.length})</span></h2>
+      return `<h2 style="margin:24px 0 8px;color:#111">${escapeHtml(title)} <span style="color:#666;font-size:14px">(${items.length})</span></h2>
         <table style="width:100%;border-collapse:collapse;font-size:13px">
           <thead><tr style="text-align:left;color:#666;border-bottom:2px solid #bbb">
             <th style="padding:8px 12px">Название</th>
@@ -1613,6 +1597,7 @@ export function ObligationsTab({
 <html lang="ru">
 <head>
   <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:;">
   <title>Обязательства — ${currentMonthLabel}</title>
   <style>
     body { font-family: -apple-system, 'Segoe UI', Roboto, sans-serif; background: #fff; color: #111; padding: 32px; max-width: 900px; margin: 0 auto; }
@@ -1807,11 +1792,6 @@ export function ObligationsTab({
               (из {filtered.length})
             </span>
           </p>
-          {carryoverFiltered.total > 0 && (
-            <p className="text-xs text-amber-400 mt-1">
-              вкл. долг: {carryoverFiltered.total.toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })} ({carryoverFiltered.count} поз.)
-            </p>
-          )}
           {totalPaidFiltered > 0 && (
             <div className="mt-2 border-t border-neutral-800 pt-2">
               <p className="text-xs text-neutral-400">Оплачено в {currentMonthLabel}</p>

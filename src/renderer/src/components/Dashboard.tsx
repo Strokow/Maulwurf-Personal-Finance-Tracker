@@ -651,6 +651,11 @@ export function Dashboard({
 
   const handleExportPDF = useCallback(async () => {
     const fmtEur = (n: number) => n.toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })
+    // Escape user-controlled strings before they land in the PDF HTML template —
+    // the off-screen print window has no CSP and no preload, so an unescaped
+    // description could inject markup and corrupt/alter the exported document.
+    const escapeHtml = (s: string): string =>
+      s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;')
     const periodLabel = `${range.from} — ${range.to}`
 
     // Export all transactions for the period, ignoring any active source filter
@@ -674,15 +679,16 @@ export function Dashboard({
       return `<tr>
         <td style="padding:6px 10px;border-bottom:1px solid #eee">${t.date}</td>
         <td style="padding:6px 10px;border-bottom:1px solid #eee;font-weight:600;color:${color}">${sign}${fmtEur(t.amount)}</td>
-        <td style="padding:6px 10px;border-bottom:1px solid #eee">${t.source}</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #eee">${escapeHtml(t.source)}</td>
         <td style="padding:6px 10px;border-bottom:1px solid #eee;color:${color}">${typeLabels[t.type]}</td>
-        <td style="padding:6px 10px;border-bottom:1px solid #eee;color:#666">${t.description ?? '—'}</td>
+        <td style="padding:6px 10px;border-bottom:1px solid #eee;color:#666">${escapeHtml(t.description ?? '—')}</td>
       </tr>`
     }).join('')
     const html = `<!DOCTYPE html>
 <html lang="ru">
 <head>
   <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:;">
   <title>Транзакции — ${periodLabel}</title>
   <style>
     body { font-family: -apple-system, 'Segoe UI', Roboto, sans-serif; background: #fff; color: #111; padding: 32px; max-width: 1000px; margin: 0 auto; }

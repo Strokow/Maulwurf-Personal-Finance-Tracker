@@ -48,7 +48,6 @@ interface YearlyPaidUntilInfo {
 interface ObligationCardProps {
   obligation: Obligation
   currentMonthRecord: ObligationMonth | null
-  carriedFrom?: { fromYear: number; fromMonth: number; months: number; totalDebt: number; resolved?: boolean }
   yearlyPaidUntil?: YearlyPaidUntilInfo
   onEdit: (obligation: Obligation) => void
   onDelete: (id: string) => void
@@ -78,7 +77,6 @@ interface ObligationCardProps {
 export function ObligationCard({
   obligation,
   currentMonthRecord,
-  carriedFrom,
   yearlyPaidUntil,
   onEdit,
   onDelete,
@@ -117,11 +115,13 @@ export function ObligationCard({
   const defaultStatus: ObligationStatus = obligation.frequency === 'yearly' ? 'unknown' : 'unpaid'
   const status: ObligationStatus = isYearlyCovered
     ? 'paid'
-    : (currentMonthRecord?.status ?? (carriedFrom ? 'unpaid' : defaultStatus))
+    : (currentMonthRecord?.status ?? defaultStatus)
   const cfg = statusConfig[status]
+  // Просматриваемый месяц содержит саму запись 'paid' годового платежа →
+  // оставляем кнопку статуса кликабельной, чтобы оплату можно было отменить;
+  // у остальных покрытых месяцев своей записи нет — переключать нечего.
+  const isPaidSourceMonth = isYearlyCovered && currentMonthRecord?.status === 'paid'
 
-  const hasCarryover = carriedFrom && carriedFrom.months > 0
-  const carryoverResolved = hasCarryover && !!carriedFrom.resolved
   // Обязательство «нативно» присутствует в этом месяце. false → карточка показана только
   // из-за переноса долга сюда (once/yearly в целевом месяце) → текущий платёж не начисляется.
   const nativeCharge = occursNatively !== false
@@ -130,8 +130,6 @@ export function ObligationCard({
   // Эффективная цена для просматриваемого месяца (amountChanges); fallback на базовый amount.
   const displayAmount = effectiveAmt !== undefined ? effectiveAmt : obligation.amount
   const currentAmount = nativeCharge ? (displayAmount ?? 0) : 0
-  const carryDebt = hasCarryover ? carriedFrom.totalDebt : 0
-  const combinedTotal = currentAmount + carryDebt
 
   // Новая система переноса долга
   const rec = currentMonthRecord
@@ -194,13 +192,11 @@ export function ObligationCard({
           ? ' border-amber-600/70 ring-1 ring-amber-700/40'
           : paidCarryover
             ? ' border-amber-800/50 ring-1 ring-amber-900/30'
-            : hasCarryover && !carryoverResolved
-              ? ' border-amber-700/60 ring-1 ring-amber-800/30'
-              : isChild
-                ? ' border-blue-800/40'
-                : isParent
-                  ? ' border-blue-700/50 ring-1 ring-blue-900/30'
-                  : ' border-neutral-800'
+            : isChild
+              ? ' border-blue-800/40'
+              : isParent
+                ? ' border-blue-700/50 ring-1 ring-blue-900/30'
+                : ' border-neutral-800'
       }`}
     >
       {dueWarning && (
@@ -226,12 +222,13 @@ export function ObligationCard({
                 через {parentName}
               </span>
             )}
-            {isYearlyCovered ? (
+            {isYearlyCovered && (
               <span className="inline-flex items-center gap-1 rounded-full bg-green-900/40 px-2 py-0.5 text-xs font-medium text-green-300">
                 <CalendarCheck className="h-3 w-3" />
                 Оплачено до {GENITIVE_MONTHS[yearlyPaidUntil.untilMonth]} {yearlyPaidUntil.untilYear}
               </span>
-            ) : isChild ? (
+            )}
+            {isYearlyCovered && !isPaidSourceMonth ? null : isChild ? (
               <span
                 className={`rounded-full px-2 py-0.5 text-xs font-medium cursor-default ${cfg.color} opacity-70`}
                 title={`Оплачивается через ${parentName ?? 'родителя'}`}
@@ -316,20 +313,6 @@ export function ObligationCard({
                     </p>
                   </div>
                 </div>
-              ) : hasCarryover && !carryoverResolved ? (
-                // Старая система: накопленный долг
-                <div className="space-y-0.5">
-                  <p className="text-lg font-bold text-amber-300">
-                    Итого: {fmtEur(combinedTotal)}
-                  </p>
-                  <p className="text-xs text-neutral-400">
-                    Этот месяц: {fmtEur(currentAmount)}
-                    {' + '}
-                    <span className="text-amber-400">
-                      долг: {fmtEur(carryDebt)} ({carriedFrom.months} мес.)
-                    </span>
-                  </p>
-                </div>
               ) : (
                 <p className="text-lg font-semibold text-neutral-200">
                   {fmtEur(currentAmount)}
@@ -392,22 +375,6 @@ export function ObligationCard({
                     Погасить долг ({fmtEur(carriedAmt!)})
                   </button>
                 )}
-              </div>
-            </div>
-          )}
-
-          {/* Старая система: Carryover warning banner */}
-          {hasCarryover && !carryoverResolved && (
-            <div className="flex items-start gap-2 rounded-lg bg-amber-950/40 border border-amber-900/30 px-3 py-2 text-xs text-amber-300 mt-1">
-              <Clock className="h-3.5 w-3.5 shrink-0 mt-0.5" />
-              <div>
-                <p className="font-medium">
-                  Включён долг с {GENITIVE_MONTHS[carriedFrom.fromMonth]} {carriedFrom.fromYear}
-                  {carriedFrom.months > 1 && ` — ${carriedFrom.months} мес.`}
-                </p>
-                <p className="text-amber-400/70 mt-0.5">
-                  ⚠ За неоплату в срок возможно начисление штрафа (Mahnung / Mahngebühr)
-                </p>
               </div>
             </div>
           )}

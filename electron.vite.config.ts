@@ -1,6 +1,12 @@
 import { resolve } from 'path'
+import { readFileSync } from 'fs'
 import { defineConfig, externalizeDepsPlugin } from 'electron-vite'
 import react from '@vitejs/plugin-react'
+
+// Single source of truth for the version shown in Settings → О программе.
+const { version } = JSON.parse(readFileSync(resolve('package.json'), 'utf-8')) as {
+  version: string
+}
 
 export default defineConfig({
   main: {
@@ -18,6 +24,9 @@ export default defineConfig({
       alias: {
         '@renderer': resolve('src/renderer/src')
       }
+    },
+    define: {
+      __APP_VERSION__: JSON.stringify(version)
     },
     plugins: [react()],
     // @ts-ignore - vitest test config is not in electron-vite renderer type

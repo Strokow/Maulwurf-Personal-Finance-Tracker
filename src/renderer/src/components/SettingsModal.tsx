@@ -14,8 +14,8 @@ import {
 } from 'lucide-react'
 import type { BackupMeta } from '../types'
 
-// Держать в синхроне с package.json (version)
-const APP_VERSION = '1.7.0'
+// Подставляется на сборке из package.json (renderer define в electron.vite.config.ts).
+const APP_VERSION = __APP_VERSION__
 
 interface PinStatus {
   enabled: boolean
