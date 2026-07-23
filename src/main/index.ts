@@ -113,6 +113,24 @@ interface BackupMeta {
   obligationCount: number
 }
 
+interface AppSettings {
+  installmentLabel: string
+  prioritySectionEnabled: boolean
+  notificationsEnabled: boolean
+}
+
+const DEFAULT_APP_SETTINGS: AppSettings = {
+  installmentLabel: 'Klarna Ratenzahlung',
+  prioritySectionEnabled: true,
+  notificationsEnabled: true
+}
+
+interface NotificationsState {
+  lastShownUpcomingDate?: string
+  lastShownFirstMonth?: string
+  lastShownMostlyUnpaid?: string
+}
+
 interface StoreSchema {
   transactions: Transaction[]
   obligations: Obligation[]
@@ -123,6 +141,9 @@ interface StoreSchema {
   klarnaResetDone: boolean
   seedCreatedAtBackfilled: boolean
   changeLog: ChangeLogEntry[]
+  appSettings: AppSettings
+  priorityObligationIds: string[]
+  notificationsState: NotificationsState
 }
 
 // Constructed inside app.whenReady() — safeStorage is only usable after the
@@ -144,7 +165,10 @@ function createStore(): Store<StoreSchema> {
       ollamaSettings: { baseUrl: 'http://localhost:11434', model: 'llama3.1:latest', availableModels: [] },
       klarnaResetDone: false,
       seedCreatedAtBackfilled: false,
-      changeLog: []
+      changeLog: [],
+      appSettings: DEFAULT_APP_SETTINGS,
+      priorityObligationIds: [],
+      notificationsState: {}
     }
   })
   // One-time migration: if the on-disk file is still plaintext, force a full
@@ -318,6 +342,11 @@ app.whenReady().then(() => {
       pinSettings: store.get('pinSettings', { enabled: false, pinHash: null, lockoutUntil: null, failedAttempts: 0 }),
       breadcrumbBuffer: store.get('breadcrumbBuffer', []),
       customSections: store.get('customSections', []),
+      // Защитный дефолт (2A.5): merge с DEFAULT_APP_SETTINGS — старый store/бэкап без
+      // новых ключей (напр. prioritySectionEnabled, Фаза 7) не должен отдавать undefined.
+      appSettings: { ...DEFAULT_APP_SETTINGS, ...store.get('appSettings', DEFAULT_APP_SETTINGS) },
+      priorityObligationIds: store.get('priorityObligationIds', []),
+      notificationsState: store.get('notificationsState', {}),
     }
   })
 
@@ -442,7 +471,11 @@ app.whenReady().then(() => {
 
   // IPC: bulk-replace all obligation months (used by undo/redo)
   guarded('store:setAllObligationMonths', (_event, months: ObligationMonth[]) => {
-    store.set('obligationMonths', months)
+    // Дедуп по ключу (obligationId, year, month) — защита от дублей при сыром bulk-write
+    // (last-write-wins). Ключ ObligationMonth уникален по инварианту.
+    const seen = new Map<string, ObligationMonth>()
+    for (const m of months) seen.set(`${m.obligationId}|${m.year}|${m.month}`, m)
+    store.set('obligationMonths', Array.from(seen.values()))
   })
 
   // IPC: bulk-replace all obligations (used for deduplication)
@@ -575,12 +608,14 @@ app.whenReady().then(() => {
 
   createWindow()
 
-  // Check notifications on startup and every 60 minutes
-  const snapshot = store.get('financialSnapshot', null)
-  checkAndNotify(snapshot)
+  // OS-нотификация (Фаза 8): сужена до critical-risk и гейтится notificationsEnabled.
+  // Три информационных типа живут только как in-app тосты (renderer) → нет двойного
+  // «за 3 дня». Проверка на старте и каждые 60 минут.
+  const notifEnabled = (): boolean =>
+    store.get('appSettings', DEFAULT_APP_SETTINGS).notificationsEnabled !== false
+  checkAndNotify(store.get('financialSnapshot', null), notifEnabled())
   setInterval(() => {
-    const snap = store.get('financialSnapshot', null)
-    checkAndNotify(snap)
+    checkAndNotify(store.get('financialSnapshot', null), notifEnabled())
   }, 60 * 60 * 1000)
 
   // IPC: new extended store methods
@@ -647,6 +682,25 @@ app.whenReady().then(() => {
     store.set('customSections', sections)
   })
 
+  // Partial-merge настроек приложения: Фазы 7/8 добавят свои поля в appSettings
+  // без нового IPC-канала.
+  guarded('store:saveAppSettings', (_event, patch: Partial<AppSettings>) => {
+    const cur = store.get('appSettings', DEFAULT_APP_SETTINGS)
+    store.set('appSettings', { ...cur, ...patch })
+  })
+
+  // Глобальный тег «Особый приоритет» (Фаза 7). Мягкая санитизация (2A.5):
+  // принимаем только массив строк, всё прочее отбрасываем.
+  guarded('store:savePriorityObligationIds', (_event, ids: unknown) => {
+    const clean = Array.isArray(ids) ? ids.filter((x): x is string => typeof x === 'string') : []
+    store.set('priorityObligationIds', clean)
+  })
+
+  // Дедуп-состояние уведомлений (Фаза 8). Persist из renderer (Home) после показа тостов.
+  guarded('store:saveNotificationsState', (_event, next: NotificationsState) => {
+    store.set('notificationsState', next && typeof next === 'object' ? next : {})
+  })
+
   // IPC: add changelog entry
   guarded('store:addChangeLog', (_event, entry: ChangeLogEntry) => {
     const log = store.get('changeLog', [])
@@ -673,6 +727,9 @@ app.whenReady().then(() => {
       pinSettings: store.get('pinSettings', {}),
       customSections: store.get('customSections', []),
       changeLog: store.get('changeLog', []),
+      appSettings: { ...DEFAULT_APP_SETTINGS, ...store.get('appSettings', DEFAULT_APP_SETTINGS) },
+      priorityObligationIds: store.get('priorityObligationIds', []),
+      notificationsState: store.get('notificationsState', {}),
     }
   }
 
@@ -743,7 +800,7 @@ app.whenReady().then(() => {
     }
     const keys = ['transactions','obligations','obligationMonths','importHistory','debtResolutions',
       'ollamaSettings','accountBalances','financialSnapshot','undoHistory','errorRegistry','pinSettings',
-      'customSections','changeLog']
+      'customSections','changeLog','appSettings','priorityObligationIds','notificationsState']
     for (const key of keys) {
       if (key in raw) store.set(key as keyof StoreSchema, raw[key] as never)
     }
@@ -774,7 +831,7 @@ app.whenReady().then(() => {
     if (typeof raw !== 'object' || raw === null) return { success: false, error: 'invalid file' }
     const keys = ['transactions','obligations','obligationMonths','importHistory','debtResolutions',
       'ollamaSettings','accountBalances','financialSnapshot','undoHistory','errorRegistry','pinSettings',
-      'customSections','changeLog']
+      'customSections','changeLog','appSettings','priorityObligationIds','notificationsState']
     for (const key of keys) {
       if (key in raw) store.set(key as keyof StoreSchema, raw[key] as never)
     }

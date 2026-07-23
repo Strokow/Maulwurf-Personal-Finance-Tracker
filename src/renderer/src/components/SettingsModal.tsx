@@ -11,6 +11,7 @@ import {
   RotateCcw,
   AlertTriangle,
   Wrench,
+  Bell,
 } from 'lucide-react'
 import type { BackupMeta } from '../types'
 
@@ -27,6 +28,8 @@ interface PinStatus {
 interface Props {
   onClose: () => void
   onRestored: () => void
+  notificationsEnabled: boolean
+  onToggleNotifications: (enabled: boolean) => void
 }
 
 function formatTs(iso: string): string {
@@ -43,7 +46,7 @@ function formatSize(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`
 }
 
-export function SettingsModal({ onClose, onRestored }: Props): React.JSX.Element {
+export function SettingsModal({ onClose, onRestored, notificationsEnabled, onToggleNotifications }: Props): React.JSX.Element {
   // ── PIN ────────────────────────────────────────────────
   const [pinStatus, setPinStatus] = useState<PinStatus | null>(null)
   const [pinMode, setPinMode] = useState<'none' | 'setup' | 'disable'>('none')
@@ -380,6 +383,38 @@ export function SettingsModal({ onClose, onRestored }: Props): React.JSX.Element
               )}
             </div>
 
+            {/* Уведомления (Фаза 8) */}
+            <div className={sectionCls}>
+              <div className="flex items-center justify-between">
+                <h3 className="flex items-center gap-2 text-sm font-medium text-neutral-300">
+                  <Bell className="h-4 w-4" />
+                  Уведомления
+                </h3>
+                <button
+                  onClick={() => onToggleNotifications(!notificationsEnabled)}
+                  title={notificationsEnabled ? 'Выключить уведомления' : 'Включить уведомления'}
+                  className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${
+                    notificationsEnabled ? 'bg-amber-600' : 'bg-neutral-700'
+                  }`}
+                >
+                  <span
+                    className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-all ${
+                      notificationsEnabled ? 'left-[18px]' : 'left-0.5'
+                    }`}
+                  />
+                </button>
+              </div>
+              <p className="text-xs text-neutral-500">
+                Один переключатель на все напоминания. Показываются как всплывающие подсказки
+                слева внизу (и системная — при риске просрочки).
+              </p>
+              <ul className="space-y-1.5 text-xs text-neutral-400">
+                <li>• <span className="text-neutral-300">За 3 дня</span> — предстоящие платежи в ближайшие 3 дня.</li>
+                <li>• <span className="text-neutral-300">Начало месяца</span> — напоминание 1-го числа проверить обязательства и балансы.</li>
+                <li>• <span className="text-neutral-300">Много неоплаченного</span> — во второй половине месяца, если оплачено меньше половины.</li>
+              </ul>
+            </div>
+
             {/* О программе */}
             <div className={sectionCls}>
               <h3 className="flex items-center gap-2 text-sm font-medium text-neutral-300">
@@ -393,6 +428,20 @@ export function SettingsModal({ onClose, onRestored }: Props): React.JSX.Element
                 <Wrench className="h-3.5 w-3.5" />
                 Открыть DevTools
               </button>
+              <div className="flex items-center justify-between border-t border-neutral-800 pt-3 text-[11px] text-neutral-600">
+                <span>Apache-2.0 · © 2026 Strokow</span>
+                <a
+                  href="https://github.com/Strokow/Maulwurf-Personal-Finance-Tracker"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1.5 transition-colors hover:text-neutral-300"
+                >
+                  <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="currentColor" aria-hidden="true">
+                    <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z" />
+                  </svg>
+                  GitHub
+                </a>
+              </div>
             </div>
           </div>
         </motion.div>

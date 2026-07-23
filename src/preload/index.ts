@@ -12,6 +12,10 @@ const api = {
       ipcRenderer.invoke('store:updateTransaction', id, updates),
     addObligation: (obligation: unknown): Promise<void> =>
       ipcRenderer.invoke('store:addObligation', obligation),
+    savePriorityObligationIds: (ids: string[]): Promise<void> =>
+      ipcRenderer.invoke('store:savePriorityObligationIds', ids),
+    saveNotificationsState: (state: unknown): Promise<void> =>
+      ipcRenderer.invoke('store:saveNotificationsState', state),
     updateObligation: (id: string, updates: unknown): Promise<void> =>
       ipcRenderer.invoke('store:updateObligation', id, updates),
     deleteObligation: (id: string): Promise<void> =>
@@ -62,6 +66,8 @@ const api = {
       ipcRenderer.invoke('store:savePinSettings', settings),
     saveCustomSections: (sections: unknown[]): Promise<void> =>
       ipcRenderer.invoke('store:saveCustomSections', sections),
+    saveAppSettings: (patch: unknown): Promise<void> =>
+      ipcRenderer.invoke('store:saveAppSettings', patch),
     addChangeLog: (entry: unknown): Promise<void> =>
       ipcRenderer.invoke('store:addChangeLog', entry),
   },

@@ -8,42 +8,25 @@ import {
   ObligationMonth,
   ObligationStatus,
 } from '../types'
+import {
+  clampDayToMonth,
+  formatLocalDate,
+  effectiveAmount,
+  getEffectiveStatus,
+  isNativeActive,
+  paidInstallmentCount,
+  roundCents,
+} from './obligationMath'
+
+// Ре-экспорт (Фаза 0): эти чистые функции переехали в obligationMath.ts (единый
+// источник предикатов), но многие модули импортируют их из financialEngine —
+// сохраняем прежний путь импорта.
+export { clampDayToMonth, formatLocalDate, effectiveAmount } from './obligationMath'
 
 const STALE_DAYS = 14
 
 function daysSince(dateStr: string): number {
   return Math.floor((Date.now() - new Date(dateStr).getTime()) / 86400000)
-}
-
-// BUG-010: clamp дня к длине месяца, иначе new Date(2026, 1, 31) = 3 марта вместо 28 февраля
-export function clampDayToMonth(year: number, month: number, day: number): number {
-  const lastDay = new Date(year, month + 1, 0).getDate()
-  return Math.min(day, lastDay)
-}
-
-// Локальный YYYY-MM-DD без сдвига в UTC: new Date(2026,4,1).toISOString() в Берлине летом даёт '2026-04-30'.
-export function formatLocalDate(d: Date): string {
-  const y = d.getFullYear()
-  const m = String(d.getMonth() + 1).padStart(2, '0')
-  const day = String(d.getDate()).padStart(2, '0')
-  return `${y}-${m}-${day}`
-}
-
-// Эффективная цена обязательства для конкретного месяца с учётом истории изменений (amountChanges).
-// Месяцы до самой ранней записи используют базовый amount. Прошлое не затрагивается изменением цены.
-export function effectiveAmount(
-  o: { amount: number | null; amountChanges?: { from: string; amount: number }[] },
-  year: number,
-  month: number
-): number | null {
-  if (!o.amountChanges || o.amountChanges.length === 0) return o.amount
-  const key = `${year}-${String(month).padStart(2, '0')}`
-  let amt = o.amount
-  for (const ch of [...o.amountChanges].sort((a, b) => a.from.localeCompare(b.from))) {
-    if (ch.from <= key) amt = ch.amount
-    else break
-  }
-  return amt
 }
 
 export function computeSnapshot(data: AppDataExtended): FinancialSnapshot {
@@ -78,7 +61,7 @@ export function computeSnapshot(data: AppDataExtended): FinancialSnapshot {
   const hasAnyRealBalance = accounts.some(
     (a) => a.confidence !== 'missing' && a.balance > 0
   )
-  const totalLiquid = accounts.reduce((s, a) => s + a.balance, 0)
+  const totalLiquid = roundCents(accounts.reduce((s, a) => s + a.balance, 0))
   const totalLiquidConfidence: DataConfidence =
     accounts.every((a) => a.confidence === 'ok')
       ? 'ok'
@@ -100,11 +83,8 @@ export function computeSnapshot(data: AppDataExtended): FinancialSnapshot {
       (m) => m.obligationId === o.id && m.year === yr0 && m.month === mo0
     )
 
-  const statusThisMonth = (o: Obligation): ObligationStatus => {
-    const rec = recThisMonth(o)
-    if (rec?.status) return rec.status
-    return (o.frequency ?? 'monthly') === 'yearly' ? 'unknown' : 'unpaid'
-  }
+  const statusThisMonth = (o: Obligation): ObligationStatus =>
+    getEffectiveStatus(o, recThisMonth(o) ?? null)
 
   // Гейт «нативности» месяца (аудит 2026-07-02): обязательство участвует в текущем
   // месяце только если месяц >= месяца createdAt; once — ТОЛЬКО в месяце создания.
@@ -112,14 +92,7 @@ export function computeSnapshot(data: AppDataExtended): FinancialSnapshot {
   // навсегда (BUG-016 закрывал это только для Klarna-once), а обязательства,
   // созданные для будущего месяца, — уже сейчас. Единый предикат со страницей
   // обязательств (isNativeActive в ObligationsTab).
-  const isNativeThisMonth = (o: Obligation): boolean => {
-    const created = new Date(o.createdAt)
-    const cy = created.getFullYear()
-    const cm = created.getMonth() + 1
-    if (yr0 < cy || (yr0 === cy && mo0 < cm)) return false
-    if ((o.frequency ?? 'monthly') === 'once') return cy === yr0 && cm === mo0
-    return true
-  }
+  const isNativeThisMonth = (o: Obligation): boolean => isNativeActive(o, yr0, mo0)
 
   // Перенос долга в дашборде (продолжение BUG-023, решение 2026-07-02):
   // долг, перенесённый ИЗ текущего месяца, здесь больше не должен;
@@ -140,10 +113,7 @@ export function computeSnapshot(data: AppDataExtended): FinancialSnapshot {
   // обязательство и не должна вычитаться из «свободных денег» каждый месяц (BUG-014/BUG-022).
   const isKlarnaCompleted = (o: Obligation): boolean => {
     if (o.totalInstallments == null) return false
-    const paid = data.obligationMonths.filter(
-      (m) => m.obligationId === o.id && m.status === 'paid'
-    ).length
-    return paid >= o.totalInstallments
+    return paidInstallmentCount(o, data.obligationMonths) >= o.totalInstallments
   }
 
   const activeObligations = data.obligations.filter(
@@ -198,7 +168,11 @@ export function computeSnapshot(data: AppDataExtended): FinancialSnapshot {
       if (!klarnaObligations.some((k) => k.id === o.id)) monthlyKlarnaCount++
     }
   }
-  const freeThisMonth = totalLiquid - monthlyObligations - monthlyKlarna
+  // Cent-корректность (Фаза 5): округляем суммы до центов на границе, чтобы float-дрейф
+  // не давал «...0000004» в отображаемых числах.
+  monthlyObligations = roundCents(monthlyObligations)
+  monthlyKlarna = roundCents(monthlyKlarna)
+  const freeThisMonth = roundCents(totalLiquid - monthlyObligations - monthlyKlarna)
 
   if (freeThisMonth < 0)
     warnings.push({

@@ -227,12 +227,33 @@ export interface PinSettings {
 }
 
 // ── Obligation extensions ──────────────────────────────────
-export type ObligationFrequency = 'monthly' | 'yearly' | 'once'
+export type ObligationFrequency = 'monthly' | 'quarterly' | 'yearly' | 'once'
 
 // Extended Obligation with new fields
 export interface ObligationExtended extends Obligation {
   frequency?: ObligationFrequency // default "monthly"
   collapsed?: boolean // default false
+}
+
+// ── App settings (общие настройки приложения) ──────────────
+export interface AppSettings {
+  // Настраиваемый заголовок раздела рассрочек (по умолчанию «Klarna Ratenzahlung»).
+  // Внутренняя модель рассрочки не меняется — это billingChain==='klarna'; лейбл лишь
+  // отвязывает раздел от бренда Klarna (Фаза 2).
+  installmentLabel: string
+  // Раздел «Особый приоритет» вверху страницы обязательств (Фаза 7). Тумблер в заголовке
+  // раздела; по умолчанию включён. Выключен → показывается только тонкий заголовок.
+  prioritySectionEnabled: boolean
+  // Один флаг на все in-app уведомления И OS-нотификацию (Фаза 8). Дефолт true.
+  notificationsEnabled: boolean
+}
+
+// Персистентный дедуп in-app уведомлений (Фаза 8). Вне undo-снимков. Канонический тип;
+// notificationEngine импортирует его отсюда (services → types, не наоборот).
+export interface NotificationsState {
+  lastShownUpcomingDate?: string // 'YYYY-MM-DD' — тип 1 не чаще раза в день
+  lastShownFirstMonth?: string // 'YYYY-MM' — тип 2 раз в месяц
+  lastShownMostlyUnpaid?: string // 'YYYY-MM' — тип 3 раз в месяц
 }
 
 // Extended AppData with new fields
@@ -247,6 +268,12 @@ export interface AppDataExtended extends AppData {
   breadcrumbBuffer: string[]
   customSections: ObligationSection[]
   changeLog: ChangeLogEntry[]
+  appSettings: AppSettings
+  // Глобальный тег «Особый приоритет» (Фаза 7, D-C): id обязательств, показываемых в верхнем
+  // display-only разделе. НЕ меняет sectionId/frequency, НЕ входит в undo-снимки.
+  priorityObligationIds: string[]
+  // Дедуп-состояние уведомлений (Фаза 8). НЕ входит в undo-снимки.
+  notificationsState: NotificationsState
 }
 
 // ── Custom obligation sections ─────────────────────────────

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import maulwurflogo from '../assets/maulwurflogo.png'
 import { motion, AnimatePresence } from 'framer-motion'
 import { CalendarClock, Plus, ArrowLeft, Bug, X, History, Settings } from 'lucide-react'
@@ -11,9 +11,12 @@ import { ObligationsTab } from '../components/ObligationsTab'
 
 import { ErrorRegistry } from '../components/ErrorRegistry'
 import { ErrorToastContainer } from '../components/ErrorToastContainer'
+import { NotificationToastContainer } from '../components/NotificationToastContainer'
 import { HistoryModal } from '../components/HistoryModal'
 import { SettingsModal } from '../components/SettingsModal'
 import { installGlobalErrorHandlers, setCurrentPage } from '../services/errorRegistry'
+import { evaluate as evaluateNotifications } from '../services/notificationEngine'
+import { emitNotificationToast } from '../services/notificationToastBus'
 import { formatLocalDate } from '../utils/financialEngine'
 
 
@@ -49,6 +52,7 @@ export function Home(): React.JSX.Element {
     deleteObligation,
     setObligationStatus,
     getObligationMonth,
+    getObligationMonthsSnapshot,
     carryObligationDebt,
     setCarriedPaid,
     returnCarriedObligation,
@@ -66,6 +70,13 @@ export function Home(): React.JSX.Element {
     addCustomSection,
     deleteCustomSection,
     renameCustomSection,
+    appSettings,
+    saveAppSettings,
+    priorityObligationIds,
+    addPriorityObligation,
+    removePriorityObligation,
+    notificationsState,
+    saveNotificationsState,
     errorRegistry,
     changeLog,
     addError,
@@ -103,6 +114,34 @@ export function Home(): React.JSX.Element {
     }
     return undefined
   }, [loading])
+
+  // In-app уведомления (Фаза 8). Home монтируется только после PIN-unlock (App.tsx),
+  // так что PIN-гейт соблюдён. Свежие данные читаем через ref (эффект не пересоздаёт
+  // таймер на каждое изменение обязательств); дедуп в notificationsState не даёт спама.
+  const notifDataRef = useRef({ financialSnapshot, obligations, obligationMonths, notificationsState, enabled: appSettings.notificationsEnabled })
+  notifDataRef.current = { financialSnapshot, obligations, obligationMonths, notificationsState, enabled: appSettings.notificationsEnabled }
+  useEffect(() => {
+    if (loading) return undefined
+    const run = (): void => {
+      const d = notifDataRef.current
+      if (!d.enabled) return
+      const { notifications, nextState } = evaluateNotifications({
+        snapshot: d.financialSnapshot,
+        obligations: d.obligations,
+        obligationMonths: d.obligationMonths,
+        now: new Date(),
+        state: d.notificationsState,
+      })
+      if (notifications.length > 0) {
+        notifications.forEach(emitNotificationToast)
+        void saveNotificationsState(nextState)
+      }
+    }
+    run() // на старте (после unlock)
+    // По интервалу — чтобы поймать переход через полночь / 1-е число при открытом окне.
+    const interval = setInterval(run, 45 * 60 * 1000)
+    return () => clearInterval(interval)
+  }, [loading, saveNotificationsState])
 
   const unresolvedErrorCount = errorRegistry.filter((e) => !e.resolved).length
 
@@ -291,6 +330,7 @@ export function Home(): React.JSX.Element {
                 onDelete={deleteObligation}
                 onStatusChange={setObligationStatus}
                 getMonthRecord={getObligationMonth}
+                getObligationMonthsSnapshot={getObligationMonthsSnapshot}
                 onUndo={undo}
                 onRedo={redo}
                 pushUndo={pushUndo}
@@ -300,6 +340,13 @@ export function Home(): React.JSX.Element {
                 onCarryDebt={carryObligationDebt}
                 onSetCarriedPaid={setCarriedPaid}
                 onReturnCarried={returnCarriedObligation}
+                installmentLabel={appSettings.installmentLabel}
+                onRenameInstallmentLabel={(label) => void saveAppSettings({ installmentLabel: label })}
+                prioritySectionEnabled={appSettings.prioritySectionEnabled}
+                onTogglePrioritySection={(enabled) => void saveAppSettings({ prioritySectionEnabled: enabled })}
+                priorityObligationIds={priorityObligationIds}
+                onAddPriority={(id) => void addPriorityObligation(id)}
+                onRemovePriority={(id) => void removePriorityObligation(id)}
               />
             </motion.div>
           )}
@@ -395,12 +442,16 @@ export function Home(): React.JSX.Element {
               await refresh()
               setSettingsOpen(false)
             }}
+            notificationsEnabled={appSettings.notificationsEnabled}
+            onToggleNotifications={(enabled) => void saveAppSettings({ notificationsEnabled: enabled })}
           />
         )}
       </AnimatePresence>
 
-      {/* Error toast notifications */}
+      {/* Error toast notifications (справа) */}
       <ErrorToastContainer />
+      {/* In-app уведомления (слева, Фаза 8) */}
+      <NotificationToastContainer />
     </div>
   )
 }

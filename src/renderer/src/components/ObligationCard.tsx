@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Pencil, Trash2, AlertTriangle, Clock, Copy, ChevronLeft, ChevronRight, CalendarCheck, Link2, Unlink, ChevronsRight, ChevronsLeft } from 'lucide-react'
+import { Pencil, Trash2, AlertTriangle, Clock, Copy, ChevronLeft, ChevronRight, CalendarCheck, Link2, Unlink, ChevronsRight, ChevronsLeft, Star } from 'lucide-react'
 import type { Obligation, ObligationMonth, ObligationStatus } from '../types'
 import { clampDayToMonth } from '../utils/financialEngine'
 
@@ -72,6 +72,9 @@ interface ObligationCardProps {
   // создания; yearly — всегда). false → карточка показана ТОЛЬКО из-за переноса долга сюда,
   // «текущий» платёж месяца не начисляется (баг №1/№2: перенос once/yearly).
   occursNatively?: boolean
+  // «Особый приоритет» (Фаза 7): кнопка-звезда — первичный механизм add/remove тега.
+  isPriority?: boolean
+  onTogglePriority?: () => void
 }
 
 export function ObligationCard({
@@ -98,6 +101,8 @@ export function ObligationCard({
   navYear,
   navMonth,
   occursNatively,
+  isPriority,
+  onTogglePriority,
 }: ObligationCardProps): React.JSX.Element {
   const [showMonthPicker, setShowMonthPicker] = useState(false)
   const [pickerYear, setPickerYear] = useState(new Date().getFullYear())
@@ -106,13 +111,14 @@ export function ObligationCard({
   const [exitDir, setExitDir] = useState<'up' | 'down' | null>(null)
 
   // For yearly obligations with paid coverage, show as "paid" even without month record
-  const isYearlyCovered = obligation.frequency === 'yearly' && !!yearlyPaidUntil
+  // Покрытие периодического обязательства (yearly=12 мес / quarterly=3 мес).
+  const isYearlyCovered = (obligation.frequency === 'yearly' || obligation.frequency === 'quarterly') && !!yearlyPaidUntil
   // Monthly obligations default to 'unpaid' when no record exists — they're active subscriptions
   // that haven't been confirmed as paid yet. Only yearly/once use 'unknown' as default.
   // Дефолт без записи: yearly → 'unknown' (неизвестно, предстоит ли оплата в этом месяце);
   // monthly и once → 'unpaid'. Once показывается ТОЛЬКО в своём месяце создания, где платёж
   // реально предстоит, поэтому 'unpaid' (а не 'unknown') — устраняет ложное «Неизвестно».
-  const defaultStatus: ObligationStatus = obligation.frequency === 'yearly' ? 'unknown' : 'unpaid'
+  const defaultStatus: ObligationStatus = (obligation.frequency === 'yearly' || obligation.frequency === 'quarterly') ? 'unknown' : 'unpaid'
   const status: ObligationStatus = isYearlyCovered
     ? 'paid'
     : (currentMonthRecord?.status ?? defaultStatus)
@@ -249,6 +255,12 @@ export function ObligationCard({
             {obligation.type === 'subscription' ? 'Подписка' : 'Ручной платёж'}
             {' · '}
             {chainLabels[obligation.billingChain] ?? obligation.billingChain}
+            {obligation.frequency === 'quarterly' && (
+              <>
+                {' · '}
+                <span className="text-cyan-400">Поквартальный</span>
+              </>
+            )}
             {obligation.frequency === 'yearly' && (
               <>
                 {' · '}
@@ -472,6 +484,19 @@ export function ObligationCard({
               </button>
             )
           })()}
+          {onTogglePriority && (
+            <button
+              onClick={onTogglePriority}
+              title={isPriority ? 'Убрать из особого приоритета' : 'В особый приоритет'}
+              className={`rounded-md p-1.5 transition-colors ${
+                isPriority
+                  ? 'text-amber-400 hover:bg-amber-950 hover:text-amber-300'
+                  : 'text-neutral-500 hover:bg-amber-950 hover:text-amber-400'
+              }`}
+            >
+              <Star className={`h-3.5 w-3.5 ${isPriority ? 'fill-amber-400' : ''}`} />
+            </button>
+          )}
           <button
             onClick={() => setShowMonthPicker(!showMonthPicker)}
             title="Скопировать в другой месяц"

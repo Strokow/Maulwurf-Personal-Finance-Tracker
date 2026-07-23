@@ -13,6 +13,7 @@ interface AddObligationModalProps {
   preselectedType?: ObligationType
   preselectedFrequency?: ObligationFrequency
   klarnaPaidCount?: number
+  installmentLabel?: string
 }
 
 const billingOptions: { value: BillingChain; label: string }[] = [
@@ -69,6 +70,7 @@ export function AddObligationModal({
   preselectedType,
   preselectedFrequency,
   klarnaPaidCount,
+  installmentLabel,
 }: AddObligationModalProps): React.JSX.Element {
   const [form, setForm] = useState<FormState>(emptyForm)
   const [priceFromThisMonth, setPriceFromThisMonth] = useState(false)
@@ -293,10 +295,10 @@ export function AddObligationModal({
 
               <div>
                 <label className="mb-1 block text-xs text-neutral-400">Периодичность</label>
-                <div className="flex gap-2">
+                <div className="grid grid-cols-2 gap-2">
                   <button
                     onClick={() => setForm(prev => ({ ...prev, frequency: 'monthly', yearlyMonth: '' }))}
-                    className={`flex-1 rounded-md px-3 py-2 text-sm ${
+                    className={`rounded-md px-3 py-2 text-sm ${
                       form.frequency === 'monthly'
                         ? 'bg-neutral-700 text-white'
                         : 'bg-neutral-800 text-neutral-400 hover:text-neutral-200'
@@ -305,8 +307,18 @@ export function AddObligationModal({
                     Ежемесячный
                   </button>
                   <button
+                    onClick={() => setForm(prev => ({ ...prev, frequency: 'quarterly', yearlyMonth: '' }))}
+                    className={`rounded-md px-3 py-2 text-sm ${
+                      form.frequency === 'quarterly'
+                        ? 'bg-neutral-700 text-white'
+                        : 'bg-neutral-800 text-neutral-400 hover:text-neutral-200'
+                    }`}
+                  >
+                    Поквартальный
+                  </button>
+                  <button
                     onClick={() => setForm(prev => ({ ...prev, frequency: 'yearly' }))}
-                    className={`flex-1 rounded-md px-3 py-2 text-sm ${
+                    className={`rounded-md px-3 py-2 text-sm ${
                       form.frequency === 'yearly'
                         ? 'bg-neutral-700 text-white'
                         : 'bg-neutral-800 text-neutral-400 hover:text-neutral-200'
@@ -316,7 +328,7 @@ export function AddObligationModal({
                   </button>
                   <button
                     onClick={() => setForm(prev => ({ ...prev, frequency: 'once', yearlyMonth: '' }))}
-                    className={`flex-1 rounded-md px-3 py-2 text-sm ${
+                    className={`rounded-md px-3 py-2 text-sm ${
                       form.frequency === 'once'
                         ? 'bg-neutral-700 text-white'
                         : 'bg-neutral-800 text-neutral-400 hover:text-neutral-200'
@@ -346,7 +358,7 @@ export function AddObligationModal({
 
               {form.billingChain === 'klarna' && (
                 <div className="rounded-lg border border-pink-900/40 bg-pink-950/20 p-3 space-y-3">
-                  <p className="text-xs font-medium text-pink-400">Рассрочка Klarna</p>
+                  <p className="text-xs font-medium text-pink-400">{installmentLabel ?? 'Klarna Ratenzahlung'}</p>
                   <div className="grid grid-cols-3 gap-3">
                     <div>
                       <label className="mb-1 block text-xs text-neutral-400">Всего платежей</label>

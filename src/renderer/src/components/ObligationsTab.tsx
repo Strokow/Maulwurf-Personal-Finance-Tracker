@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback, useRef, useEffect } from 'react'
+import { useState, useMemo, useCallback, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   Plus,
@@ -16,6 +16,7 @@ import {
   Trash2,
   Check as CheckIcon,
   Download,
+  Star,
 } from 'lucide-react'
 import type {
   Obligation,
@@ -29,7 +30,20 @@ import type {
 } from '../types'
 import { ObligationCard } from './ObligationCard'
 import { AddObligationModal } from './AddObligationModal'
-import { clampDayToMonth, formatLocalDate, effectiveAmount } from '../utils/financialEngine'
+import {
+  clampDayToMonth,
+  formatLocalDate,
+  effectiveAmount,
+  getEffectiveStatus as computeEffectiveStatus,
+  isNativeActive as computeNativeActive,
+  isInstallmentCompleted as computeInstallmentCompleted,
+  isHiddenCompleted as computeHiddenCompleted,
+  coverageMonths,
+  paidUntil as computePaidUntil,
+  roundCents,
+  type PeriodFrequency,
+} from '../utils/obligationMath'
+import { parseKlarnaBulkLines } from '../utils/klarnaBulk'
 
 interface ObligationsTabProps {
   obligations: Obligation[]
@@ -49,6 +63,7 @@ interface ObligationsTabProps {
     skipUndo?: boolean
   ) => Promise<void>
   getMonthRecord: (obligationId: string, year: number, month: number) => ObligationMonth | null
+  getObligationMonthsSnapshot: () => ObligationMonth[]
   onUndo?: () => Promise<void>
   onRedo?: () => Promise<void>
   pushUndo?: (action: string, before: Partial<AppData>, after: Partial<AppData>) => void
@@ -58,6 +73,14 @@ interface ObligationsTabProps {
   onCarryDebt: (obligationId: string, fromYear: number, fromMonth: number, toYear: number, toMonth: number) => Promise<void>
   onSetCarriedPaid: (obligationId: string, year: number, month: number, paid: boolean) => Promise<void>
   onReturnCarried: (obligationId: string, year: number, month: number) => Promise<void>
+  installmentLabel: string
+  onRenameInstallmentLabel: (label: string) => void
+  // «Особый приоритет» (Фаза 7, D-C): глобальный тег, display-only раздел вверху.
+  prioritySectionEnabled: boolean
+  onTogglePrioritySection: (enabled: boolean) => void
+  priorityObligationIds: string[]
+  onAddPriority: (id: string) => void
+  onRemovePriority: (id: string) => void
 }
 
 export function ObligationsTab({
@@ -71,6 +94,7 @@ export function ObligationsTab({
   onDelete,
   onStatusChange,
   getMonthRecord,
+  getObligationMonthsSnapshot,
   onUndo,
   onRedo,
   pushUndo,
@@ -80,6 +104,13 @@ export function ObligationsTab({
   onCarryDebt,
   onSetCarriedPaid,
   onReturnCarried,
+  installmentLabel,
+  onRenameInstallmentLabel,
+  prioritySectionEnabled,
+  onTogglePrioritySection,
+  priorityObligationIds,
+  onAddPriority,
+  onRemovePriority,
 }: ObligationsTabProps): React.JSX.Element {
   const [modalOpen, setModalOpen] = useState(false)
   const [editTarget, setEditTarget] = useState<Obligation | null>(null)
@@ -91,6 +122,10 @@ export function ObligationsTab({
   const [renamingSectionId, setRenamingSectionId] = useState<string | null>(null)
   const [renamingSectionName, setRenamingSectionName] = useState('')
   const [collapsedSections, setCollapsedSections] = useState<Set<string>>(new Set())
+  // Инлайн-переименование заголовка раздела рассрочек (Фаза 2). Внутренняя модель
+  // (billingChain==='klarna') не меняется — редактируем только отображаемый лейбл.
+  const [renamingLabel, setRenamingLabel] = useState(false)
+  const [labelDraft, setLabelDraft] = useState('')
 
   // Month navigation
   const [navYear, setNavYear] = useState(new Date().getFullYear())
@@ -99,11 +134,12 @@ export function ObligationsTab({
   // Search and filters
   const [searchQuery, setSearchQuery] = useState('')
   const [filterStatus, setFilterStatus] = useState<'all' | 'paid' | 'unpaid' | 'unknown'>('all')
-  const [filterType, setFilterType] = useState<'all' | 'monthly' | 'yearly' | 'once'>('all')
+  const [filterType, setFilterType] = useState<'all' | 'monthly' | 'quarterly' | 'yearly' | 'once'>('all')
   const [sortBy, setSortBy] = useState<'name' | 'amount' | 'date'>('name')
 
   // Collapsed sections
   const [collapsedMonthly, setCollapsedMonthly] = useState(false)
+  const [collapsedQuarterly, setCollapsedQuarterly] = useState(false)
   const [collapsedYearly, setCollapsedYearly] = useState(false)
   const [collapsedOnce, setCollapsedOnce] = useState(false)
   const [collapsedKlarna, setCollapsedKlarna] = useState(false)
@@ -126,37 +162,17 @@ export function ObligationsTab({
   const [klarnaAddSaving, setKlarnaAddSaving] = useState(false)
   const [klarnaParseError, setKlarnaParseError] = useState('')
   const [klarnaSaveError, setKlarnaSaveError] = useState('')
+  // Фаза 4: режим Klarna-модалки — ручной ввод (по умолчанию) или массовый список.
+  const [klarnaMode, setKlarnaMode] = useState<'manual' | 'bulk'>('manual')
+  const [klarnaBulkText, setKlarnaBulkText] = useState('')
+  const [klarnaBulkError, setKlarnaBulkError] = useState('')
 
-  // One-time cleanup: single-payment Klarna obligations (totalInstallments=1)
-  // should not have ObligationMonth records in future months
-  const singleKlarnaCleanupDone = useRef(false)
-  useEffect(() => {
-    if (singleKlarnaCleanupDone.current) return
-    const todayY = new Date().getFullYear()
-    const todayM = new Date().getMonth() + 1
-    const singleKlarnaIds = new Set(
-      obligations
-        .filter((o) => o.billingChain === 'klarna' && o.totalInstallments === 1)
-        .map((o) => o.id)
-    )
-    if (singleKlarnaIds.size === 0) return
-    const futureMonths = obligationMonths.filter(
-      (m) => singleKlarnaIds.has(m.obligationId) && (m.year > todayY || (m.year === todayY && m.month > todayM))
-    )
-    if (futureMonths.length === 0) return
-    singleKlarnaCleanupDone.current = true
-    const kept = obligationMonths.filter(
-      (m) => !(singleKlarnaIds.has(m.obligationId) && (m.year > todayY || (m.year === todayY && m.month > todayM)))
-    )
-    void window.api.store.setAllObligationMonths(kept)
-    // Also update frequency to 'once' for these obligations
-    for (const id of singleKlarnaIds) {
-      const ob = obligations.find((o) => o.id === id)
-      if (ob && ob.frequency !== 'once') {
-        void onUpdate(id, { frequency: 'once' })
-      }
-    }
-  }, [obligations, obligationMonths, onUpdate])
+  // УДАЛЁН «single-Klarna cleanup»-эффект (2026-07, data-loss BUG-017-класс):
+  // он вызывал `setAllObligationMonths(kept)` сырым IPC из УСТАРЕВШЕГО React-state,
+  // минуя useStore/ref → терял свежепроставленные статусы (несколько июльских Klarna
+  // «оплачено» пропадали). Его разовая миграция (totalInstallments===1 →
+  // frequency:'once' + удаление будущих записей) уже применена, а новые единоразовые
+  // создаются сразу как 'once' — эффект был не нужен и только вредил.
 
   const now = useMemo(() => new Date(), [])
   const year = navYear
@@ -180,15 +196,10 @@ export function ObligationsTab({
   // «Нативно» активно в заданном месяце: isActive + месяц >= createdAt (once — только
   // в месяце создания). Единый предикат: используется и для базового active, и как гейт
   // «начислять ли текущий платёж месяца» (nativeThisMonth) в подсчётах.
-  const isNativeActive = useCallback((o: Obligation, y: number, m: number): boolean => {
-    if (!o.isActive) return false
-    const created = new Date(o.createdAt)
-    const createdYear = created.getFullYear()
-    const createdMonth = created.getMonth() + 1
-    if (y < createdYear || (y === createdYear && m < createdMonth)) return false
-    if (o.frequency === 'once') return createdYear === y && createdMonth === m
-    return true
-  }, [])
+  const isNativeActive = useCallback(
+    (o: Obligation, y: number, m: number): boolean => computeNativeActive(o, y, m),
+    []
+  )
 
   // Обязательства, ПЕРЕНЕСЁННЫЕ В этот месяц (есть isCarriedOver-запись за nav-месяц).
   // Нужно, чтобы once/yearly (которые фильтр active не показывает вне их месяца) всё равно
@@ -202,8 +213,14 @@ export function ObligationsTab({
   }, [obligationMonths, year, month])
 
   const active = useMemo(
-    () => obligations.filter((o) => isNativeActive(o, year, month) || (o.isActive && carriedInIds.has(o.id))),
-    [obligations, year, month, isNativeActive, carriedInIds]
+    () => obligations.filter((o) =>
+      (isNativeActive(o, year, month) || (o.isActive && carriedInIds.has(o.id))) &&
+      // Фаза 6: завершённая рассрочка видна в месяце последнего платежа и скрыта во всех
+      // последующих (данные не удаляются). Единая точка — убирает её из карточек, обоих
+      // экспортов и всех сумм/счётчиков (которые уже исключали completed).
+      !computeHiddenCompleted(o, obligationMonths, year, month)
+    ),
+    [obligations, year, month, isNativeActive, carriedInIds, obligationMonths]
   )
 
   // For yearly obligations: find the month they were last paid and compute "paid until" date.
@@ -212,18 +229,17 @@ export function ObligationsTab({
     const map = new Map<string, { paidMonth: number; paidYear: number; untilMonth: number; untilYear: number }>()
 
     for (const o of active) {
-      if (o.frequency !== 'yearly') continue
+      const freq = o.frequency
+      if (freq !== 'yearly' && freq !== 'quarterly') continue
+      const cov = coverageMonths(freq as PeriodFrequency) // 12 | 3
 
-      // Search backwards from current viewing month for a 'paid' record (up to 12 months)
+      // Search backwards from current viewing month for a 'paid' record (up to coverage+1 months)
       let cy = year
       let cm = month
-      for (let i = 0; i < 13; i++) {
+      for (let i = 0; i < cov + 1; i++) {
         const rec = getMonthRecord(o.id, cy, cm)
         if (rec?.status === 'paid') {
-          // Paid in cy/cm → valid until cm of cy+1 (exclusive: months cm..cy+1 minus 1 month)
-          let untilMonth = cm - 1
-          let untilYear = cy + 1
-          if (untilMonth === 0) { untilMonth = 12; untilYear-- }
+          const { untilYear, untilMonth } = computePaidUntil(freq as PeriodFrequency, cy, cm)
           map.set(o.id, { paidMonth: cm, paidYear: cy, untilMonth, untilYear })
           break
         }
@@ -237,7 +253,7 @@ export function ObligationsTab({
 
   // Check if a yearly obligation is covered (paid) for the current viewing month
   const isYearlyCovered = useCallback((o: Obligation): boolean => {
-    if (o.frequency !== 'yearly') return false
+    if (o.frequency !== 'yearly' && o.frequency !== 'quarterly') return false
     const info = yearlyPaidUntilMap.get(o.id)
     if (!info) return false
     // Current viewing month is covered if it's between paidMonth/paidYear and untilMonth/untilYear (inclusive)
@@ -262,12 +278,10 @@ export function ObligationsTab({
   // Вычисляет эффективный статус обязательства для nav-месяца.
   // Monthly без записи → 'unpaid' (активная подписка, не подтверждена оплата).
   // Yearly/once без записи → 'unknown'.
-  const getEffectiveStatus = useCallback((o: Obligation, rec: ObligationMonth | null): ObligationStatus => {
-    if (rec?.status != null) return rec.status
-    // yearly → 'unknown' (неизвестно, due ли в этом месяце); monthly и once → 'unpaid'.
-    // Once виден только в своём месяце создания, где платёж реально предстоит.
-    return o.frequency === 'yearly' ? 'unknown' : 'unpaid'
-  }, [])
+  const getEffectiveStatus = useCallback(
+    (o: Obligation, rec: ObligationMonth | null): ObligationStatus => computeEffectiveStatus(o, rec),
+    []
+  )
 
   // Apply filters
   const filtered = useMemo(() => {
@@ -292,6 +306,7 @@ export function ObligationsTab({
       if (filterType !== 'all') {
         const freq: ObligationFrequency = o.frequency ?? 'monthly'
         if (filterType === 'monthly' && freq !== 'monthly') return false
+        if (filterType === 'quarterly' && freq !== 'quarterly') return false
         if (filterType === 'yearly' && freq !== 'yearly') return false
         if (filterType === 'once' && freq !== 'once') return false
       }
@@ -304,8 +319,8 @@ export function ObligationsTab({
     return [...filtered].sort((a, b) => {
       const recA = getMonthRecord(a.id, year, month)
       const recB = getMonthRecord(b.id, year, month)
-      const aIsYearlyCovered = a.frequency === 'yearly' && isYearlyCovered(a)
-      const bIsYearlyCovered = b.frequency === 'yearly' && isYearlyCovered(b)
+      const aIsYearlyCovered = isYearlyCovered(a) // covered yearly/quarterly тонут вниз
+      const bIsYearlyCovered = isYearlyCovered(b)
       const aPaid = recA?.status === 'paid' || aIsYearlyCovered
       const bPaid = recB?.status === 'paid' || bIsYearlyCovered
       if (aPaid !== bPaid) return aPaid ? 1 : -1
@@ -329,6 +344,7 @@ export function ObligationsTab({
     return rec?.status === 'paid'
   })
   const klarnaMonthly = sorted.filter((o) => o.billingChain === 'klarna' && !o.sectionId && !o.parentId)
+  const quarterlyObligations = sorted.filter((o) => o.frequency === 'quarterly' && o.billingChain !== 'klarna' && !o.sectionId && !o.parentId)
   const yearlyObligations = sorted.filter((o) => o.frequency === 'yearly' && o.billingChain !== 'klarna' && !o.sectionId && !o.parentId)
   const onceObligations = sorted.filter((o) => o.frequency === 'once' && o.billingChain !== 'klarna' && !o.sectionId && !o.parentId)
 
@@ -346,13 +362,12 @@ export function ObligationsTab({
   }, [obligations, obligationMonths])
 
   // BUG-014: Klarna полностью оплачена (paid count >= totalInstallments).
-  // Карточка остаётся видимой как «история», но не учитывается в шапке €/мес и в paidCount.
-  const isKlarnaCompleted = useCallback((o: Obligation): boolean => {
-    if (o.billingChain !== 'klarna') return false
-    if (!o.totalInstallments) return false
-    const paid = klarnaPaidCountMap.get(o.id) ?? 0
-    return paid >= o.totalInstallments
-  }, [klarnaPaidCountMap])
+  // Не учитывается в шапке €/мес и в paidCount. Видимость карточки — по isHiddenCompleted
+  // (Фаза 6): показана в месяце последнего платежа, скрыта позже (через фильтр active).
+  const isKlarnaCompleted = useCallback(
+    (o: Obligation): boolean => computeInstallmentCompleted(o, obligationMonths),
+    [obligationMonths]
+  )
 
   // Obligations grouped by custom section
   const sectionObligations = useMemo(() => {
@@ -363,8 +378,43 @@ export function ObligationsTab({
     return map
   }, [sorted, customSections])
 
+  // «Особый приоритет» (Фаза 7, D-C + 2A.3): display-only список вверху страницы.
+  // Инвариант видимости: показываем ТОЛЬКО обязательства, и так видимые в этом месяце
+  // (filtered = нативные/перенесённые, не skipped, не скрытые completed, с учётом
+  // фильтров пользователя) — тег не воскрешает скрытые карточки. Порядок = порядок
+  // добавления. В суммы/счётчики страницы НЕ входит (не задваиваем итоги).
+  const priorityObligations = useMemo(() => {
+    return priorityObligationIds
+      .map((id) => filtered.find((o) => o.id === id))
+      .filter((o): o is Obligation => o != null)
+  }, [priorityObligationIds, filtered])
+
+  // Кнопка-звезда — первичный механизм add/remove тега (без undo: обратимо той же кнопкой).
+  const togglePriority = useCallback((id: string) => {
+    if (priorityObligationIds.includes(id)) onRemovePriority(id)
+    else onAddPriority(id)
+  }, [priorityObligationIds, onAddPriority, onRemovePriority])
+
+  // DnD в приоритет (2A.3): ИЗОЛИРОВАННАЯ drop-зона — только добавляет тег.
+  // НЕ переиспользует section/child-обработчики и НЕ меняет sectionId/frequency.
+  const [priorityDropActive, setPriorityDropActive] = useState(false)
+  const handlePriorityDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setPriorityDropActive(true)
+  }, [])
+  const handlePriorityDragLeave = useCallback(() => setPriorityDropActive(false), [])
+  const handlePriorityDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setPriorityDropActive(false)
+    const id = e.dataTransfer.getData('text/plain')
+    if (!id || !obligations.some((o) => o.id === id)) return
+    if (!priorityObligationIds.includes(id)) onAddPriority(id)
+  }, [obligations, priorityObligationIds, onAddPriority])
+
   const totalMonthlyFiltered = useMemo(() => {
-    return filtered.reduce((sum, o) => {
+    return roundCents(filtered.reduce((sum, o) => {
       // Завершённая рассрочка Klarna (оплачено >= всего платежей) больше ничего не должна,
       // но в месяцах после последнего платежа у неё нет записи → дефолт monthly 'unpaid'
       // ложно добавлял её сумму в «Осталось оплатить» (BUG-022).
@@ -374,11 +424,10 @@ export function ObligationsTab({
 
       const rec = getMonthRecord(o.id, year, month)
 
-      // Yearly: skip if covered or not due this month
-      if (o.frequency === 'yearly') {
-        if (isYearlyCovered(o)) return sum
-        if (o.yearlyMonth != null && o.yearlyMonth !== month) return sum
-      }
+      // Периодические (yearly/quarterly): покрытые пропускаем; yearly с якорным
+      // месяцем — считаем только в свой месяц. isYearlyCovered() = false для непериодических.
+      if (isYearlyCovered(o)) return sum
+      if (o.frequency === 'yearly' && o.yearlyMonth != null && o.yearlyMonth !== month) return sum
 
       const base = effectiveAmount(o, year, month) ?? 0
 
@@ -400,11 +449,11 @@ export function ObligationsTab({
       if (!rec && getEffectiveStatus(o, null) === 'unknown') return sum
 
       return sum + base
-    }, 0)
+    }, 0))
   }, [filtered, isYearlyCovered, getMonthRecord, year, month, getEffectiveStatus, carryDestMap, isKlarnaCompleted, isNativeActive])
 
   const totalPaidFiltered = useMemo(() => {
-    return filtered.reduce((sum, o) => {
+    return roundCents(filtered.reduce((sum, o) => {
       const rec = getMonthRecord(o.id, year, month)
       const base = effectiveAmount(o, year, month) ?? 0
 
@@ -417,11 +466,12 @@ export function ObligationsTab({
 
       if (rec?.status === 'paid') return sum + base
       return sum
-    }, 0)
+    }, 0))
   }, [filtered, getMonthRecord, year, month, isNativeActive])
 
   // Годовой итог — только нативные (перенесённые сюда yearly не дают «текущего» начисления).
-  const yearlyTotal = yearlyObligations.reduce((s, o) => s + (isNativeActive(o, year, month) ? (effectiveAmount(o, year, month) ?? 0) : 0), 0)
+  const yearlyTotal = roundCents(yearlyObligations.reduce((s, o) => s + (isNativeActive(o, year, month) ? (effectiveAmount(o, year, month) ?? 0) : 0), 0))
+  const quarterlyTotal = roundCents(quarterlyObligations.reduce((s, o) => s + (isNativeActive(o, year, month) ? (effectiveAmount(o, year, month) ?? 0) : 0), 0))
 
   const paidCount = filtered.filter((o) => {
     // BUG-014: completed Klarna (paid >= totalInstallments) исключены из счётчика —
@@ -444,16 +494,14 @@ export function ObligationsTab({
       const nativeHere = isNativeActive(o, year, month)
       return !rec.carriedPaid || (nativeHere && rec.status !== 'paid')
     }
-    if (o.frequency === 'yearly') {
-      if (isYearlyCovered(o)) return false           // already covered
-      if (o.yearlyMonth != null && o.yearlyMonth !== month) return false
-    }
+    if (isYearlyCovered(o)) return false             // покрытый период (yearly/quarterly)
+    if (o.frequency === 'yearly' && o.yearlyMonth != null && o.yearlyMonth !== month) return false
     // Paid → not pending
     if (rec?.status === 'paid') return false
     // Explicitly unknown → excluded
     if (rec && rec.status === 'unknown') return false
-    // Monthly obligations default to 'unpaid' even without a record
-    if (!rec && o.frequency === 'yearly') return false
+    // Без записи: yearly/quarterly дефолтятся в 'unknown' → не ожидают оплаты
+    if (!rec && getEffectiveStatus(o, null) === 'unknown') return false
     // 'unpaid' or monthly without record or carryover → pending
     return true
   }).length
@@ -514,6 +562,9 @@ export function ObligationsTab({
         )
       }
       await onDelete(deleteConfirm)
+      // Гигиена тега приоритета (Фаза 7): удалённое обязательство не оставляет
+      // висячий id в priorityObligationIds (add/remove без undo — как сам тег).
+      if (priorityObligationIds.includes(deleteConfirm)) onRemovePriority(deleteConfirm)
       setDeleteConfirm(null)
     }
   }
@@ -822,13 +873,89 @@ export function ObligationsTab({
     }
   }
 
+  // Фаза 4: превью массового списка (live) + пакетное создание рассрочек одним undo.
+  const klarnaBulkParsed = useMemo(() => parseKlarnaBulkLines(klarnaBulkText), [klarnaBulkText])
+
+  const handleKlarnaBulkAdd = async (): Promise<void> => {
+    setKlarnaBulkError('')
+    const { valid, errors } = parseKlarnaBulkLines(klarnaBulkText)
+    if (valid.length === 0) {
+      setKlarnaBulkError(errors[0] ?? 'Нет корректных строк')
+      return
+    }
+    setKlarnaAddSaving(true)
+    try {
+      const beforeObligations = [...obligations]
+      const beforeMonths = [...obligationMonths]
+      const newObligations: Obligation[] = []
+      const newRecords: ObligationMonth[] = []
+      const realNow = new Date()
+      const curYM = realNow.getFullYear() * 12 + (realNow.getMonth() + 1)
+
+      for (const e of valid) {
+        const [npYear, npMonthNum, npDay] = e.nextDate.split('-').map(Number)
+        // Начало рассрочки = месяц следующего платежа минус число уже оплаченных
+        // (та же логика, что в installment-ветке handleKlarnaAdd).
+        let startYear = npYear
+        let startMonth = npMonthNum - e.paid
+        while (startMonth <= 0) { startMonth += 12; startYear-- }
+        const createdAt = new Date(startYear, startMonth - 1, 1).toISOString()
+
+        const newObligation = await onAdd({
+          name: `${e.name} (рассрочка ${(e.monthly * e.totalInst).toFixed(2)}€)`,
+          type: 'manual_payment',
+          amount: e.monthly,
+          approximateDay: npDay || null,
+          billingChain: 'klarna',
+          source: 'Klarna',
+          isActive: true,
+          frequency: 'monthly',
+          totalInstallments: e.totalInst,
+        }, createdAt)
+        newObligations.push(newObligation)
+
+        // future-paid guard (BUG-015): месяцы позже текущего реального не помечаем 'оплачено'.
+        for (let i = 0; i < e.paid; i++) {
+          let paidYear = npYear
+          let paidMonth = npMonthNum - e.paid + i
+          while (paidMonth <= 0) { paidMonth += 12; paidYear-- }
+          if (paidYear * 12 + paidMonth > curYM) break
+          // skipUndo=true — свой undo не пишем: ниже ОДИН объединённый на всю пачку.
+          await onStatusChange(newObligation.id, paidYear, paidMonth, 'paid', undefined, true)
+          newRecords.push({
+            obligationId: newObligation.id, year: paidYear, month: paidMonth,
+            status: 'paid', actualAmount: null, paidDate: formatLocalDate(new Date()),
+          })
+        }
+      }
+
+      if (pushUndo) {
+        pushUndo(`Добавление рассрочек (${newObligations.length})`,
+          { obligations: beforeObligations, obligationMonths: beforeMonths },
+          { obligations: [...beforeObligations, ...newObligations], obligationMonths: [...beforeMonths, ...newRecords] }
+        )
+      }
+
+      setKlarnaAddOpen(false)
+      setKlarnaBulkText('')
+      setKlarnaBulkError('')
+      setKlarnaMode('manual')
+    } catch (err) {
+      setKlarnaBulkError('Не удалось сохранить: ' + (err instanceof Error ? err.message : 'неизвестная ошибка'))
+    } finally {
+      setKlarnaAddSaving(false)
+    }
+  }
+
   const handleStatusToggle = async (
     obligationId: string,
     status: ObligationStatus
   ): Promise<void> => {
     const currentRecord = getMonthRecord(obligationId, year, month)
-    // Save current state for undo BEFORE change
-    const beforeState = { obligationMonths: [...obligationMonths] }
+    // Снимок ДО изменения — из СВЕЖЕГО ref (не из отстающего prop): иначе undo мог
+    // откатить лишние статусы и записать устаревший массив на диск (BUG-017-вектор,
+    // подтверждён: несколько июльских Klarna «оплачено» пропали после нажатия undo).
+    const beforeState = { obligationMonths: [...getObligationMonthsSnapshot()] }
 
     // skipUndo=true: внутренние вызовы НЕ пишут собственный undo — ниже пушим ОДИН
     // объединённый undo на всю операцию (статус + дети + carryover). Иначе одно нажатие
@@ -850,7 +977,7 @@ export function ObligationsTab({
         if (cm === 0) { cm = 12; cy-- }
         for (let i = 0; i < MAX_CARRY; i++) {
           if (cy < cYear || (cy === cYear && cm < cMonth)) break
-          const rec = obligationMonths.find(
+          const rec = getObligationMonthsSnapshot().find(
             r => r.obligationId === oId && r.year === cy && r.month === cm
           )
           if (rec?.status !== 'unpaid') break
@@ -880,47 +1007,11 @@ export function ObligationsTab({
       await onStatusChange(oId, y, m, 'paid', undefined, true)
     }
 
-    // After change, push undo with correct before/after
+    // Снимок ПОСЛЕ — тоже из свежего ref: к этому моменту все onStatusChange
+    // (обязательство + дети + carryover) синхронно обновили ref, поэтому ручная
+    // реконструкция afterMonths больше не нужна (и не может разойтись с реальностью).
     if (pushUndo) {
-      const afterRecord = {
-        obligationId,
-        year,
-        month,
-        status,
-        actualAmount: currentRecord?.actualAmount ?? null,
-        matchedTransactionId: currentRecord?.matchedTransactionId,
-        paidDate: status === 'paid' ? formatLocalDate(new Date()) : undefined
-      }
-      let afterMonths = obligationMonths.filter(
-        m => !(m.obligationId === obligationId && m.year === year && m.month === month)
-      ).concat(afterRecord)
-      // Include child records in undo
-      for (const child of childObligations) {
-        afterMonths = afterMonths.filter(
-          r => !(r.obligationId === child.id && r.year === year && r.month === month)
-        ).concat({
-          obligationId: child.id,
-          year,
-          month,
-          status,
-          actualAmount: null,
-          paidDate: status === 'paid' ? formatLocalDate(new Date()) : undefined
-        })
-      }
-      // Also include carryover months in undo state
-      for (const { y, m, oId } of carryoverMonthsToPay) {
-        afterMonths = afterMonths.filter(
-          r => !(r.obligationId === oId && r.year === y && r.month === m)
-        ).concat({
-          obligationId: oId,
-          year: y,
-          month: m,
-          status: 'paid',
-          actualAmount: null,
-          paidDate: formatLocalDate(new Date())
-        })
-      }
-      const afterState = { obligationMonths: afterMonths }
+      const afterState = { obligationMonths: [...getObligationMonthsSnapshot()] }
       pushUndo('Изменение статуса обязательства', beforeState, afterState)
     }
 
@@ -1032,6 +1123,9 @@ export function ObligationsTab({
     if (targetSection === 'monthly') {
       if ((obligation.frequency ?? 'monthly') === 'monthly' && !obligation.sectionId && !obligation.parentId) return
       patch = { frequency: 'monthly', sectionId: undefined, parentId: undefined }
+    } else if (targetSection === 'quarterly') {
+      if (obligation.frequency === 'quarterly' && !obligation.sectionId && !obligation.parentId) return
+      patch = { frequency: 'quarterly', sectionId: undefined, parentId: undefined }
     } else if (targetSection === 'yearly') {
       if (obligation.frequency === 'yearly' && !obligation.sectionId && !obligation.parentId) return
       patch = { frequency: 'yearly', sectionId: undefined, parentId: undefined }
@@ -1227,6 +1321,8 @@ export function ObligationsTab({
             navYear={year}
             navMonth={month}
             occursNatively={isNativeActive(o, year, month)}
+            isPriority={priorityObligationIds.includes(o.id)}
+            onTogglePriority={() => togglePriority(o.id)}
           />
         </div>
         {children.length > 0 && (
@@ -1272,6 +1368,8 @@ export function ObligationsTab({
                       navYear={year}
                       navMonth={month}
                       occursNatively={isNativeActive(child, year, month)}
+                      isPriority={priorityObligationIds.includes(child.id)}
+                      onTogglePriority={() => togglePriority(child.id)}
                     />
                   </div>
                 )
@@ -1288,14 +1386,14 @@ export function ObligationsTab({
         )}
       </div>
     )
-  }, [childrenMap, linkDropTarget, childAreaDropTarget, handleDragStart, handleDrag, handleDragEnd, handleCardDragOver, handleCardDragLeave, handleCardDrop, handleChildAreaDragOver, handleChildAreaDragLeave, handleChildAreaDrop, getMonthRecord, year, month, carryDestMap, yearlyPaidUntilMap, isYearlyCovered, handleEdit, handleDelete, handleStatusToggle, handleCopyToMonth, handleUnlink, klarnaPaidCountMap, onCarryDebt, handlePayCarried, handlePayAll, handleReturnCarried, isNativeActive])
+  }, [childrenMap, linkDropTarget, childAreaDropTarget, handleDragStart, handleDrag, handleDragEnd, handleCardDragOver, handleCardDragLeave, handleCardDrop, handleChildAreaDragOver, handleChildAreaDragLeave, handleChildAreaDrop, getMonthRecord, year, month, carryDestMap, yearlyPaidUntilMap, isYearlyCovered, handleEdit, handleDelete, handleStatusToggle, handleCopyToMonth, handleUnlink, klarnaPaidCountMap, onCarryDebt, handlePayCarried, handlePayAll, handleReturnCarried, isNativeActive, priorityObligationIds, togglePriority])
 
   const handleExportMD = useCallback(async () => {
     const fmtEur = (n: number): string => n.toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })
     const statusLabel = (s: ObligationStatus): string =>
       ({ paid: 'Оплачено', unpaid: 'Не оплачено', unknown: 'Неизвестно', skipped: 'Пропущено' }[s] ?? 'Неизвестно')
     const freqLabel = (f?: ObligationFrequency): string =>
-      f === 'yearly' ? 'Ежегодный' : f === 'once' ? 'Единоразовый' : 'Ежемесячный'
+      f === 'yearly' ? 'Ежегодный' : f === 'quarterly' ? 'Поквартальный' : f === 'once' ? 'Единоразовый' : 'Ежемесячный'
 
     const GEN_MONTHS = ['', 'января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря']
     const NOM_MONTHS = ['', 'Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь']
@@ -1319,7 +1417,7 @@ export function ObligationsTab({
         } else {
           const st = isYearlyCovered(o)
             ? 'paid'
-            : (rec?.status ?? (o.frequency === 'yearly' ? 'unknown' : 'unpaid')) as ObligationStatus
+            : computeEffectiveStatus(o, rec ?? null)
           const ea = effectiveAmount(o, year, month); const amt = ea !== null ? fmtEur(ea) : '—'
           out.push(`| ${name} | ${freqLabel(o.frequency)} | ${amt} | ${dayStr} | ${statusLabel(st)} | ${notes} |`)
         }
@@ -1343,6 +1441,7 @@ export function ObligationsTab({
     // BUG-019: Klarna (любой frequency) — отдельный раздел, исключён из monthly/yearly/once.
     const klarnaAll = allSorted.filter(o => o.billingChain === 'klarna' && !o.sectionId && !o.parentId)
     const monthlyAll = allSorted.filter(o => (o.frequency ?? 'monthly') === 'monthly' && o.billingChain !== 'klarna' && !o.sectionId && !o.parentId)
+    const quarterlyAll = allSorted.filter(o => o.frequency === 'quarterly' && o.billingChain !== 'klarna' && !o.sectionId && !o.parentId)
     const yearlyAll = allSorted.filter(o => o.frequency === 'yearly' && o.billingChain !== 'klarna' && !o.sectionId && !o.parentId)
     const onceAll = allSorted.filter(o => o.frequency === 'once' && o.billingChain !== 'klarna' && !o.sectionId && !o.parentId)
     const allCustomMd = customSections
@@ -1354,10 +1453,8 @@ export function ObligationsTab({
       if (isKlarnaCompleted(o)) return sum
       if (carryDestMap.has(o.id)) return sum
       const rec = getMonthRecord(o.id, year, month)
-      if (o.frequency === 'yearly') {
-        if (isYearlyCovered(o)) return sum
-        if (o.yearlyMonth != null && o.yearlyMonth !== month) return sum
-      }
+      if (isYearlyCovered(o)) return sum
+      if (o.frequency === 'yearly' && o.yearlyMonth != null && o.yearlyMonth !== month) return sum
       const base = effectiveAmount(o, year, month) ?? 0
       if (rec?.isCarriedOver) {
         const nativeHere = isNativeActive(o, year, month)
@@ -1368,7 +1465,7 @@ export function ObligationsTab({
       }
       if (rec?.status === 'paid') return sum
       if (rec && rec.status === 'unknown') return sum
-      if (!rec && o.frequency === 'yearly') return sum
+      if (!rec && computeEffectiveStatus(o, null) === 'unknown') return sum
       return sum + base
     }, 0)
 
@@ -1396,13 +1493,11 @@ export function ObligationsTab({
         const nativeHere = isNativeActive(o, year, month)
         return !rec.carriedPaid || (nativeHere && rec.status !== 'paid')
       }
-      if (o.frequency === 'yearly') {
-        if (isYearlyCovered(o)) return false
-        if (o.yearlyMonth != null && o.yearlyMonth !== month) return false
-      }
+      if (isYearlyCovered(o)) return false
+      if (o.frequency === 'yearly' && o.yearlyMonth != null && o.yearlyMonth !== month) return false
       if (rec?.status === 'paid') return false
       if (rec && rec.status === 'unknown') return false
-      if (!rec && o.frequency === 'yearly') return false
+      if (!rec && computeEffectiveStatus(o, null) === 'unknown') return false
       return true
     }).length
 
@@ -1420,6 +1515,7 @@ export function ObligationsTab({
       `| Ожидают оплаты | ${pendingCountAll} |`,
       renderGroupMd('Ежемесячные', monthlyAll),
       renderGroupMd('Klarna', klarnaAll),
+      renderGroupMd('Поквартальные', quarterlyAll),
       renderGroupMd('Ежегодные', yearlyAll),
       renderGroupMd('Единоразовые', onceAll),
       allCustomMd,
@@ -1452,7 +1548,7 @@ export function ObligationsTab({
       return `<span style="color:${color};font-weight:600">${text}</span>`
     }
     const freqLabel = (f?: ObligationFrequency): string =>
-      f === 'yearly' ? 'Ежегодный' : f === 'once' ? 'Единоразовый' : 'Ежемесячный'
+      f === 'yearly' ? 'Ежегодный' : f === 'quarterly' ? 'Поквартальный' : f === 'once' ? 'Единоразовый' : 'Ежемесячный'
 
     const GEN_MONTHS = ['', 'января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря']
     const NOM_MONTHS = ['', 'Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь']
@@ -1484,7 +1580,7 @@ export function ObligationsTab({
         } else {
           const st = isYearlyCovered(o)
             ? 'paid'
-            : (rec?.status ?? (o.frequency === 'yearly' ? 'unknown' : 'unpaid')) as ObligationStatus
+            : computeEffectiveStatus(o, rec ?? null)
           const ea = effectiveAmount(o, year, month); const amt = ea !== null ? fmtEur(ea) : '—'
           out.push(`<tr>
           <td style="${td}">${name}</td>
@@ -1532,6 +1628,7 @@ export function ObligationsTab({
     // BUG-019: Klarna (любой frequency) — отдельный раздел, исключён из monthly/yearly/once.
     const klarnaAll = allSorted.filter(o => o.billingChain === 'klarna' && !o.sectionId && !o.parentId)
     const monthlyAll = allSorted.filter(o => (o.frequency ?? 'monthly') === 'monthly' && o.billingChain !== 'klarna' && !o.sectionId && !o.parentId)
+    const quarterlyAll = allSorted.filter(o => o.frequency === 'quarterly' && o.billingChain !== 'klarna' && !o.sectionId && !o.parentId)
     const yearlyAll = allSorted.filter(o => o.frequency === 'yearly' && o.billingChain !== 'klarna' && !o.sectionId && !o.parentId)
     const onceAll = allSorted.filter(o => o.frequency === 'once' && o.billingChain !== 'klarna' && !o.sectionId && !o.parentId)
     const allCustom = customSections.map(s => renderGroup(s.name, allSorted.filter(o => o.sectionId === s.id))).join('')
@@ -1541,10 +1638,8 @@ export function ObligationsTab({
       if (isKlarnaCompleted(o)) return sum
       if (carryDestMap.has(o.id)) return sum
       const rec = getMonthRecord(o.id, year, month)
-      if (o.frequency === 'yearly') {
-        if (isYearlyCovered(o)) return sum
-        if (o.yearlyMonth != null && o.yearlyMonth !== month) return sum
-      }
+      if (isYearlyCovered(o)) return sum
+      if (o.frequency === 'yearly' && o.yearlyMonth != null && o.yearlyMonth !== month) return sum
       const base = effectiveAmount(o, year, month) ?? 0
       if (rec?.isCarriedOver) {
         const nativeHere = isNativeActive(o, year, month)
@@ -1555,7 +1650,7 @@ export function ObligationsTab({
       }
       if (rec?.status === 'paid') return sum
       if (rec && rec.status === 'unknown') return sum
-      if (!rec && o.frequency === 'yearly') return sum
+      if (!rec && computeEffectiveStatus(o, null) === 'unknown') return sum
       return sum + base
     }, 0)
 
@@ -1583,13 +1678,11 @@ export function ObligationsTab({
         const nativeHere = isNativeActive(o, year, month)
         return !rec.carriedPaid || (nativeHere && rec.status !== 'paid')
       }
-      if (o.frequency === 'yearly') {
-        if (isYearlyCovered(o)) return false
-        if (o.yearlyMonth != null && o.yearlyMonth !== month) return false
-      }
+      if (isYearlyCovered(o)) return false
+      if (o.frequency === 'yearly' && o.yearlyMonth != null && o.yearlyMonth !== month) return false
       if (rec?.status === 'paid') return false
       if (rec && rec.status === 'unknown') return false
-      if (!rec && o.frequency === 'yearly') return false
+      if (!rec && computeEffectiveStatus(o, null) === 'unknown') return false
       return true
     }).length
 
@@ -1631,6 +1724,7 @@ export function ObligationsTab({
   </div>
   ${renderGroup('Ежемесячные', monthlyAll)}
   ${renderGroup('Klarna', klarnaAll)}
+  ${renderGroup('Поквартальные', quarterlyAll)}
   ${renderGroup('Ежегодные', yearlyAll)}
   ${renderGroup('Единоразовые', onceAll)}
   ${allCustom}
@@ -1742,7 +1836,7 @@ export function ObligationsTab({
           ))}
         </div>
         <div className="flex items-center gap-1">
-          {(['all', 'monthly', 'yearly', 'once'] as const).map((t) => (
+          {(['all', 'monthly', 'quarterly', 'yearly', 'once'] as const).map((t) => (
             <button
               key={t}
               onClick={() => setFilterType(t)}
@@ -1752,7 +1846,7 @@ export function ObligationsTab({
                   : 'bg-neutral-800 text-neutral-500 hover:text-neutral-300'
               }`}
             >
-              {t === 'all' ? 'Все' : t === 'monthly' ? 'Ежемесячные' : t === 'yearly' ? 'Ежегодные' : 'Единоразовые'}
+              {t === 'all' ? 'Все' : t === 'monthly' ? 'Ежемесячные' : t === 'quarterly' ? 'Поквартальные' : t === 'yearly' ? 'Ежегодные' : 'Единоразовые'}
             </button>
           ))}
         </div>
@@ -1835,6 +1929,97 @@ export function ObligationsTab({
 
       {/* Grouped sections */}
       <div className="space-y-4">
+        {/* Особый приоритет (Фаза 7): display-only тег-раздел. НЕ входит в итоги страницы.
+            Drop-зона изолирована (2A.3): drop сюда только добавляет тег, не меняет секцию. */}
+        <div
+          className={`rounded-xl border transition-colors ${
+            priorityDropActive ? 'border-amber-500 bg-amber-950/20' : 'border-amber-900/40 bg-amber-950/5'
+          }`}
+          onDragOver={handlePriorityDragOver}
+          onDragLeave={handlePriorityDragLeave}
+          onDrop={handlePriorityDrop}
+        >
+          <div className="flex items-center justify-between px-4 py-3">
+            <div className="flex items-center gap-2">
+              <Star className={`h-4 w-4 ${prioritySectionEnabled ? 'text-amber-400 fill-amber-400/40' : 'text-neutral-600'}`} />
+              <h3 className={`text-sm font-medium ${prioritySectionEnabled ? 'text-amber-200' : 'text-neutral-500'}`}>
+                Особый приоритет
+              </h3>
+              {prioritySectionEnabled && (
+                <>
+                  <span className="rounded-full bg-amber-900/40 px-2 py-0.5 text-xs text-amber-300">
+                    {priorityObligations.length}
+                  </span>
+                  {priorityObligations.length > 0 && (
+                    <span className="text-xs text-amber-500/70">
+                      {priorityObligations.reduce((s, o) => s + (effectiveAmount(o, year, month) ?? 0), 0).toFixed(2)}€
+                    </span>
+                  )}
+                </>
+              )}
+            </div>
+            <button
+              onClick={() => onTogglePrioritySection(!prioritySectionEnabled)}
+              title={prioritySectionEnabled ? 'Выключить раздел' : 'Включить раздел'}
+              className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${
+                prioritySectionEnabled ? 'bg-amber-600' : 'bg-neutral-700'
+              }`}
+            >
+              <span
+                className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-all ${
+                  prioritySectionEnabled ? 'left-[18px]' : 'left-0.5'
+                }`}
+              />
+            </button>
+          </div>
+          <AnimatePresence>
+            {prioritySectionEnabled && (
+              <motion.div
+                initial={{ height: 0, opacity: 0 }}
+                animate={{ height: 'auto', opacity: 1 }}
+                exit={{ height: 0, opacity: 0 }}
+                className="overflow-hidden"
+              >
+                <div className="px-3 pb-3 space-y-2">
+                  {priorityObligations.length === 0 ? (
+                    <p className="rounded border border-dashed border-amber-900/40 px-3 py-2 text-center text-xs text-amber-700/70">
+                      Нажми ★ на карточке или перетащи её сюда
+                    </p>
+                  ) : (
+                    priorityObligations.map((o) => {
+                      const carryDest = carryDestMap.get(o.id)
+                      return (
+                        <ObligationCard
+                          key={o.id}
+                          obligation={o}
+                          currentMonthRecord={getMonthRecord(o.id, year, month)}
+                          yearlyPaidUntil={isYearlyCovered(o) ? yearlyPaidUntilMap.get(o.id) : undefined}
+                          onEdit={handleEdit}
+                          onDelete={handleDelete}
+                          onStatusChange={handleStatusToggle}
+                          onCopy={handleCopyToMonth}
+                          klarnaPaidCount={klarnaPaidCountMap.get(o.id)}
+                          carriedToYear={carryDest?.toYear}
+                          carriedToMonth={carryDest?.toMonth}
+                          onPayCarried={() => { void handlePayCarried(o.id) }}
+                          onPayAll={() => { void handlePayAll(o.id) }}
+                          onReturnCarried={() => { void handleReturnCarried(o.id) }}
+                          effectiveAmt={effectiveAmount(o, year, month)}
+                          navYear={year}
+                          navMonth={month}
+                          occursNatively={isNativeActive(o, year, month)}
+                          isPriority
+                          onTogglePriority={() => onRemovePriority(o.id)}
+                        />
+                      )
+                    })
+                  )}
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
+
         {/* Monthly obligations */}
         <div
           className={`rounded-xl border bg-neutral-900/30 transition-colors ${
@@ -1884,7 +2069,23 @@ export function ObligationsTab({
                               className="flex items-center gap-2 flex-1 cursor-pointer"
                               onClick={() => setCollapsedKlarna(!collapsedKlarna)}
                             >
-                              <span className="text-xs font-medium text-pink-300">Klarna Ratenzahlung</span>
+                              {renamingLabel ? (
+                                <input
+                                  autoFocus
+                                  value={labelDraft}
+                                  onClick={(e) => e.stopPropagation()}
+                                  onChange={(e) => setLabelDraft(e.target.value)}
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter') { const v = labelDraft.trim(); if (v) onRenameInstallmentLabel(v); setRenamingLabel(false) }
+                                    if (e.key === 'Escape') setRenamingLabel(false)
+                                  }}
+                                  onBlur={() => { const v = labelDraft.trim(); if (v) onRenameInstallmentLabel(v); setRenamingLabel(false) }}
+                                  placeholder="Название раздела"
+                                  className="w-44 rounded border border-pink-700/50 bg-neutral-900 px-1.5 py-0.5 text-xs text-pink-200 focus:outline-none"
+                                />
+                              ) : (
+                                <span className="text-xs font-medium text-pink-300">{installmentLabel}</span>
+                              )}
                               <span className="rounded-full bg-pink-900/40 px-1.5 py-0.5 text-[10px] text-pink-400">
                                 {klarnaMonthly.length}
                               </span>
@@ -1894,12 +2095,19 @@ export function ObligationsTab({
                             </div>
                             <div className="flex items-center gap-1">
                               <button
-                                onClick={(e) => { e.stopPropagation(); setKlarnaAddOpen(true) }}
+                                onClick={(e) => { e.stopPropagation(); setKlarnaMode('manual'); setKlarnaBulkText(''); setKlarnaBulkError(''); setKlarnaAddOpen(true) }}
                                 className="flex items-center gap-1 rounded px-2 py-0.5 text-[10px] text-pink-400/70 hover:bg-pink-900/30 hover:text-pink-300 transition-colors"
                                 title="Добавить рассрочку"
                               >
                                 <Plus className="h-3 w-3" />
                                 Добавить
+                              </button>
+                              <button
+                                onClick={(e) => { e.stopPropagation(); setLabelDraft(installmentLabel); setRenamingLabel(true) }}
+                                className="rounded p-0.5 text-pink-400/50 hover:bg-pink-900/30 hover:text-pink-300 transition-colors"
+                                title="Переименовать раздел"
+                              >
+                                <Pencil className="h-3 w-3" />
                               </button>
                               <ChevronDown
                                 className={`h-3.5 w-3.5 text-pink-400/60 transition-transform cursor-pointer ${collapsedKlarna ? '-rotate-90' : ''}`}
@@ -1937,6 +2145,57 @@ export function ObligationsTab({
                   >
                     <Plus className="h-4 w-4" />
                     Добавить обязательство
+                  </button>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
+
+        {/* Quarterly obligations */}
+        <div
+          className={`rounded-xl border bg-neutral-900/30 transition-colors ${
+            dragOverSection === 'quarterly' ? 'border-blue-600 bg-blue-950/10' : 'border-neutral-800'
+          }`}
+          onDragOver={(e) => handleDragOver(e, 'quarterly')}
+          onDragLeave={handleDragLeave}
+          onDrop={(e) => handleDrop(e, 'quarterly')}
+        >
+          <div
+            className="flex items-center justify-between px-4 py-3 cursor-pointer"
+            onClick={() => setCollapsedQuarterly(!collapsedQuarterly)}
+          >
+            <div className="flex items-center gap-2">
+              <h3 className="text-sm font-medium text-neutral-300">Поквартальные</h3>
+              <span className="rounded-full bg-neutral-800 px-2 py-0.5 text-xs text-neutral-400">
+                {quarterlyObligations.length}
+              </span>
+              <span className="text-xs text-neutral-500">
+                {quarterlyTotal.toFixed(2)}€/кв
+              </span>
+            </div>
+            <ChevronDown className={`h-4 w-4 text-neutral-500 transition-transform ${collapsedQuarterly ? '-rotate-90' : ''}`} />
+          </div>
+          <AnimatePresence>
+            {!collapsedQuarterly && (
+              <motion.div
+                initial={{ height: 0, opacity: 0 }}
+                animate={{ height: 'auto', opacity: 1 }}
+                exit={{ height: 0, opacity: 0 }}
+                className="overflow-hidden"
+              >
+                <div className="p-4 pt-0 space-y-2">
+                  {quarterlyObligations.length === 0 ? (
+                    <p className="text-sm text-neutral-500">Нет поквартальных обязательств</p>
+                  ) : (
+                    quarterlyObligations.map((o) => renderObligationWithChildren(o))
+                  )}
+                  <button
+                    onClick={() => handleOpenAdd('manual_payment', 'quarterly')}
+                    className="flex w-full items-center justify-center gap-2 rounded-xl border border-dashed border-neutral-700 py-2 text-sm text-neutral-500 transition-colors hover:border-neutral-500 hover:text-neutral-300"
+                  >
+                    <Plus className="h-4 w-4" />
+                    Добавить поквартальное
                   </button>
                 </div>
               </motion.div>
@@ -2190,8 +2449,21 @@ export function ObligationsTab({
             className="w-full max-w-lg rounded-xl border border-neutral-800 bg-neutral-900 p-6 shadow-xl max-h-[90vh] overflow-y-auto"
             onMouseDown={(e) => e.stopPropagation()}
           >
-            <h3 className="mb-1 text-base font-semibold text-neutral-100">Добавить платёж Klarna</h3>
+            <h3 className="mb-1 text-base font-semibold text-neutral-100">Добавить платёж · {installmentLabel}</h3>
 
+            {/* Режим: ручной ввод (по умолчанию) vs массовый список (Фаза 4) */}
+            <div className="mb-3 mt-2 flex gap-2">
+              <button type="button" onClick={() => setKlarnaMode('manual')}
+                className={`flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${klarnaMode === 'manual' ? 'bg-neutral-700 text-neutral-100' : 'bg-neutral-800 text-neutral-400 hover:text-neutral-200'}`}>
+                Вручную
+              </button>
+              <button type="button" onClick={() => setKlarnaMode('bulk')}
+                className={`flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${klarnaMode === 'bulk' ? 'bg-neutral-700 text-neutral-100' : 'bg-neutral-800 text-neutral-400 hover:text-neutral-200'}`}>
+                Список
+              </button>
+            </div>
+
+            {klarnaMode === 'manual' && (<>
             {/* Payment type toggle */}
             <div className="mb-3 flex gap-2">
               <button
@@ -2317,18 +2589,52 @@ export function ObligationsTab({
                 </>
               )}
             </div>
+            </>)}
+
+            {klarnaMode === 'bulk' && (
+              <div className="space-y-3">
+                <p className="text-xs text-neutral-500">
+                  Одна рассрочка = одна строка:<br />
+                  <span className="font-mono text-neutral-400">Название | Сумма/мес | ВсегоПлатежей | Оплачено | Дата(YYYY-MM-DD)</span>
+                </p>
+                <textarea
+                  value={klarnaBulkText}
+                  onChange={(e) => setKlarnaBulkText(e.target.value)}
+                  rows={7}
+                  placeholder={`DJI | 25.00 | 12 | 5 | 2026-08-15\nAmazon | 14.90 | 6 | 0 | 2026-08-01`}
+                  className="w-full rounded border border-neutral-700 bg-neutral-800 px-3 py-2 text-xs text-neutral-100 focus:border-neutral-500 focus:outline-none resize-none font-mono"
+                />
+                {klarnaBulkText.trim() && (
+                  <div className="rounded-lg border border-neutral-800 bg-neutral-900/40 p-2 text-xs">
+                    <p className="text-neutral-400">
+                      Готово к добавлению: <span className="text-green-400">{klarnaBulkParsed.valid.length}</span>
+                      {klarnaBulkParsed.errors.length > 0 ? `, с ошибками: ${klarnaBulkParsed.errors.length}` : ''}
+                    </p>
+                    {klarnaBulkParsed.errors.length > 0 && (
+                      <ul className="mt-1 space-y-0.5 text-red-400">
+                        {klarnaBulkParsed.errors.map((er, i) => <li key={i}>• {er}</li>)}
+                      </ul>
+                    )}
+                  </div>
+                )}
+                {klarnaBulkError && <p className="text-xs text-red-400">{klarnaBulkError}</p>}
+              </div>
+            )}
+
             {klarnaSaveError && (
               <p className="mt-3 text-xs text-red-400">{klarnaSaveError}</p>
             )}
             <div className="mt-5 flex justify-end gap-2">
-              <button type="button" onClick={() => { setKlarnaAddOpen(false); setKlarnaSaveError('') }}
+              <button type="button" onClick={() => { setKlarnaAddOpen(false); setKlarnaSaveError(''); setKlarnaBulkError('') }}
                 className="rounded-md px-4 py-2 text-sm text-neutral-400 hover:text-neutral-200">
                 Отмена
               </button>
-              <button type="button" onClick={handleKlarnaAdd}
-                disabled={klarnaAddSaving || !klarnaAddMerchant.trim() || !klarnaAddMonthly || (klarnaPaymentType === 'installment' && (!klarnaAddTotalInst || !klarnaAddNextDate))}
+              <button type="button" onClick={klarnaMode === 'bulk' ? handleKlarnaBulkAdd : handleKlarnaAdd}
+                disabled={klarnaAddSaving || (klarnaMode === 'bulk'
+                  ? klarnaBulkParsed.valid.length === 0
+                  : (!klarnaAddMerchant.trim() || !klarnaAddMonthly || (klarnaPaymentType === 'installment' && (!klarnaAddTotalInst || !klarnaAddNextDate))))}
                 className="rounded-md bg-pink-900/60 px-4 py-2 text-sm font-medium text-pink-200 hover:bg-pink-900 disabled:opacity-40">
-                {klarnaAddSaving ? 'Сохранение...' : 'Добавить'}
+                {klarnaAddSaving ? 'Сохранение...' : klarnaMode === 'bulk' ? `Добавить (${klarnaBulkParsed.valid.length})` : 'Добавить'}
               </button>
             </div>
           </motion.div>
@@ -2383,6 +2689,7 @@ export function ObligationsTab({
         preselectedType={preselectedType}
         preselectedFrequency={preselectedFrequency}
         klarnaPaidCount={editTarget ? klarnaPaidCountMap.get(editTarget.id) : undefined}
+        installmentLabel={installmentLabel}
       />
 
     </div>

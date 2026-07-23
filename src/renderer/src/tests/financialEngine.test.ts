@@ -542,3 +542,39 @@ describe('computeSnapshot', () => {
     })
   })
 })
+
+describe('computeSnapshot — поквартальные (Фаза 3)', () => {
+  const now = new Date()
+  const yr = now.getFullYear()
+  const mo = now.getMonth() + 1
+
+  it('quarterly без записи не вычитается из freeThisMonth (дефолт unknown, как yearly)', () => {
+    const obligations = [
+      makeObligation({ id: 'q1', amount: 30, frequency: 'quarterly', createdAt: '2020-01-01T00:00:00.000Z' }),
+    ]
+    const data = makeAppData({
+      accountBalances: [makeBalance('sparkasse', 100)],
+      obligations,
+      // записи нет → quarterly дефолтится в 'unknown' → не входит в knownObligations
+    })
+    const snap = computeSnapshot(data)
+    expect(snap.monthlyObligations).toBe(0)
+    expect(snap.monthlyObligationsCount).toBe(0)
+    expect(snap.freeThisMonth).toBe(100)
+  })
+
+  it('quarterly с записью unpaid за текущий месяц — вычитается', () => {
+    const obligations = [
+      makeObligation({ id: 'q2', amount: 30, frequency: 'quarterly', createdAt: '2020-01-01T00:00:00.000Z' }),
+    ]
+    const data = makeAppData({
+      accountBalances: [makeBalance('sparkasse', 100)],
+      obligations,
+      obligationMonths: [{ obligationId: 'q2', year: yr, month: mo, status: 'unpaid', actualAmount: null }],
+    })
+    const snap = computeSnapshot(data)
+    expect(snap.monthlyObligations).toBe(30)
+    expect(snap.monthlyObligationsCount).toBe(1)
+    expect(snap.freeThisMonth).toBe(70)
+  })
+})

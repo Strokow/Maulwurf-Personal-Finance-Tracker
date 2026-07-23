@@ -25,6 +25,8 @@ interface StoreAPI {
   delete: (id: string) => Promise<void>
   updateTransaction: (id: string, updates: unknown) => Promise<void>
   addObligation: (obligation: unknown) => Promise<void>
+  savePriorityObligationIds: (ids: string[]) => Promise<void>
+  saveNotificationsState: (state: unknown) => Promise<void>
   updateObligation: (id: string, updates: unknown) => Promise<void>
   deleteObligation: (id: string) => Promise<void>
   setObligationMonth: (record: unknown) => Promise<void>
@@ -50,6 +52,7 @@ interface StoreAPI {
   saveRedoStack: (stack: unknown[]) => Promise<void>
   savePinSettings: (settings: unknown) => Promise<void>
   saveCustomSections: (sections: unknown[]) => Promise<void>
+  saveAppSettings: (patch: unknown) => Promise<void>
   addChangeLog: (entry: unknown) => Promise<void>
 }
 

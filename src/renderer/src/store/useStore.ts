@@ -20,6 +20,8 @@ import type {
   ErrorRecord,
   PinSettings,
   AppDataExtended,
+  AppSettings,
+  NotificationsState,
   ObligationSection,
   ChangeLogEntry,
   ChangeLogCategory,
@@ -328,6 +330,7 @@ export interface UseStoreReturn {
   pinSettings: PinSettings
   breadcrumbBuffer: string[]
   customSections: ObligationSection[]
+  appSettings: AppSettings
   changeLog: ChangeLogEntry[]
   loading: boolean
   addTransaction: (t: Omit<Transaction, 'id' | 'createdAt'>) => Promise<void>
@@ -346,6 +349,7 @@ export interface UseStoreReturn {
     skipUndo?: boolean
   ) => Promise<void>
   getObligationMonth: (obligationId: string, year: number, month: number) => ObligationMonth | null
+  getObligationMonthsSnapshot: () => ObligationMonth[]
   carryObligationDebt: (obligationId: string, fromYear: number, fromMonth: number, toYear: number, toMonth: number) => Promise<void>
   setCarriedPaid: (obligationId: string, year: number, month: number, paid: boolean) => Promise<void>
   returnCarriedObligation: (obligationId: string, year: number, month: number) => Promise<void>
@@ -375,12 +379,24 @@ export interface UseStoreReturn {
   addCustomSection: (name: string) => Promise<ObligationSection>
   deleteCustomSection: (id: string) => Promise<void>
   renameCustomSection: (id: string, name: string) => Promise<void>
+  saveAppSettings: (patch: Partial<AppSettings>) => Promise<void>
+  priorityObligationIds: string[]
+  addPriorityObligation: (id: string) => Promise<void>
+  removePriorityObligation: (id: string) => Promise<void>
+  notificationsState: NotificationsState
+  saveNotificationsState: (state: NotificationsState) => Promise<void>
 }
 
 const DEFAULT_OLLAMA_SETTINGS: OllamaSettings = {
   baseUrl: 'http://localhost:11434',
   model: 'qwen2.5:7b',
   availableModels: []
+}
+
+const DEFAULT_APP_SETTINGS: AppSettings = {
+  installmentLabel: 'Klarna Ratenzahlung',
+  prioritySectionEnabled: true,
+  notificationsEnabled: true
 }
 
 export function useStore(): UseStoreReturn {
@@ -405,6 +421,9 @@ export function useStore(): UseStoreReturn {
   const [loading, setLoading] = useState(true)
   const [redoStack, setRedoStack] = useState<HistoryEntry[]>([])
   const [customSections, setCustomSections] = useState<ObligationSection[]>([])
+  const [appSettings, setAppSettings] = useState<AppSettings>(DEFAULT_APP_SETTINGS)
+  const [priorityObligationIds, setPriorityObligationIds] = useState<string[]>([])
+  const [notificationsState, setNotificationsStateLocal] = useState<NotificationsState>({})
   const [changeLog, setChangeLog] = useState<ChangeLogEntry[]>([])
 
   const refresh = useCallback(async () => {
@@ -425,6 +444,11 @@ export function useStore(): UseStoreReturn {
     setPinSettings(data.pinSettings ?? { enabled: false, pinHash: null, lockoutUntil: null, failedAttempts: 0 })
     setBreadcrumbBuffer(data.breadcrumbBuffer ?? [])
     setCustomSections(data.customSections ?? [])
+    // Защитный merge с дефолтами: старый store/бэкап без новых ключей appSettings
+    // (напр. prioritySectionEnabled) не должен обнулять их до undefined.
+    setAppSettings({ ...DEFAULT_APP_SETTINGS, ...(data.appSettings ?? {}) })
+    setPriorityObligationIds(data.priorityObligationIds ?? [])
+    setNotificationsStateLocal(data.notificationsState ?? {})
     setChangeLog(data.changeLog ?? [])
     setLoading(false)
   }, [])
@@ -699,6 +723,11 @@ export function useStore(): UseStoreReturn {
     },
     [obligationMonths]
   )
+
+  // Свежий снимок obligationMonths из ref (синхронно обновляется в setObligationStatus).
+  // Нужен вызывающим (handleStatusToggle), чтобы undo-снимок брался из АКТУАЛЬНОГО массива,
+  // а не из отстающего React-state prop — иначе undo мог откатить лишние статусы (BUG-017).
+  const getObligationMonthsSnapshot = useCallback((): ObligationMonth[] => obligationMonthsRef.current, [])
 
   const carryObligationDebt = useCallback(
     async (obligationId: string, fromYear: number, fromMonth: number, toYear: number, toMonth: number) => {
@@ -1196,6 +1225,48 @@ export function useStore(): UseStoreReturn {
     [customSections]
   )
 
+  // appSettings: partial-merge; НЕ входит в undo-снимки (это настройка, не данные обязательств).
+  const saveAppSettings = useCallback(async (patch: Partial<AppSettings>) => {
+    try {
+      setAppSettings((prev) => ({ ...prev, ...patch }))
+      await window.api.store.saveAppSettings(patch)
+    } catch (e) {
+      captureError(e, 'ipc_error', 'saveAppSettings')
+      throw e
+    }
+  }, [])
+
+  // Глобальный тег «Особый приоритет» (Фаза 7, D-C): add/remove БЕЗ undo (обратимо
+  // кнопкой на карточке); НЕ входит в undo-снимки — refresh() после undo не обнуляет.
+  const savePriorityIds = useCallback(async (ids: string[]) => {
+    try {
+      setPriorityObligationIds(ids)
+      await window.api.store.savePriorityObligationIds(ids)
+    } catch (e) {
+      captureError(e, 'ipc_error', 'savePriorityObligationIds')
+    }
+  }, [])
+
+  const addPriorityObligation = useCallback(async (id: string) => {
+    if (priorityObligationIds.includes(id)) return
+    await savePriorityIds([...priorityObligationIds, id])
+  }, [priorityObligationIds, savePriorityIds])
+
+  const removePriorityObligation = useCallback(async (id: string) => {
+    if (!priorityObligationIds.includes(id)) return
+    await savePriorityIds(priorityObligationIds.filter((x) => x !== id))
+  }, [priorityObligationIds, savePriorityIds])
+
+  // Дедуп-состояние уведомлений (Фаза 8): persist после показа тостов. Вне undo-снимков.
+  const saveNotificationsState = useCallback(async (next: NotificationsState) => {
+    try {
+      setNotificationsStateLocal(next)
+      await window.api.store.saveNotificationsState(next)
+    } catch (e) {
+      captureError(e, 'ipc_error', 'saveNotificationsState')
+    }
+  }, [])
+
   return {
     transactions,
     obligations,
@@ -1212,6 +1283,7 @@ export function useStore(): UseStoreReturn {
     pinSettings,
     breadcrumbBuffer,
     customSections,
+    appSettings,
     changeLog,
     loading,
     addTransaction,
@@ -1223,6 +1295,7 @@ export function useStore(): UseStoreReturn {
     deleteObligation,
     setObligationStatus,
     getObligationMonth,
+    getObligationMonthsSnapshot,
     carryObligationDebt,
     setCarriedPaid,
     returnCarriedObligation,
@@ -1247,5 +1320,11 @@ export function useStore(): UseStoreReturn {
     addCustomSection,
     deleteCustomSection,
     renameCustomSection,
+    saveAppSettings,
+    priorityObligationIds,
+    addPriorityObligation,
+    removePriorityObligation,
+    notificationsState,
+    saveNotificationsState,
   }
 }
